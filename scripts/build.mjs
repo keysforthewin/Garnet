@@ -1,11 +1,12 @@
 import { build as bundle } from 'esbuild';
 import { build as vite } from 'vite';
-import { mkdir, writeFile, readdir, readFile, copyFile, cp } from 'node:fs/promises';
+import { mkdir, writeFile, readdir, readFile, copyFile, rm } from 'node:fs/promises';
 import { gzipSync } from 'node:zlib';
 await mkdir('build', { recursive: true });
+await rm('build/runner.mjs', { force: true });
+await rm('build/runner.mjs.map', { force: true });
 await vite();
 await bundle({ entryPoints: ['server/index.ts'], outfile: 'build/server.mjs', bundle: true, platform: 'node', format: 'esm', target: 'node22', packages: 'external', sourcemap: true });
-await bundle({ entryPoints: ['runner/index.ts'], outfile: 'build/runner.mjs', bundle: true, platform: 'node', format: 'esm', target: 'node22', sourcemap: true });
 await bundle({ entryPoints: ['runner/tools.ts'], outfile: 'build/tools.mjs', bundle: true, platform: 'node', format: 'esm', target: 'node22' });
 const assets = (await readdir('build/public/assets')).map(file => `/assets/${file}`);
 const version = assets.filter(file => file.endsWith('.js')).join('|');

@@ -8,7 +8,7 @@ async function api(route, method = 'GET', body) {
   const response = await fetch(`${base}${route}`, { method, headers: { Cookie: cookie, 'Content-Type': 'application/json', 'X-CSRF-Token': auth.csrf }, body: body === undefined ? undefined : JSON.stringify(body) });
   const result = await response.json(); if (!response.ok) throw new Error(`${route}: ${result.error}`); return result;
 }
-assert.equal((await api('/runner')).ok, true, 'Start the runner against data/test-runtime first.');
+assert.equal((await api('/runner')).ok, true, 'The integrated agent executor should be available.');
 const marker = Date.now();
 for (const provider of ['claude', 'codex']) {
   const title = `Agent smoke ${provider} ${marker}`;

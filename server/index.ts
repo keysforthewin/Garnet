@@ -1,7 +1,9 @@
 import express from 'express';
 import compression from 'compression';
 import { createServer } from 'node:http';
-import { request as httpRequest } from 'node:http';
+import { createAgentRunner } from '../runner/index.js';
+import { createModelCatalog } from '../runner/models.js';
+import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
 import { Hocuspocus } from '@hocuspocus/server';
 import { MongoClient } from 'mongodb';
@@ -11,15 +13,16 @@ import { randomUUID } from 'node:crypto';
 import * as Y from 'yjs';
 import { yDocToProsemirrorJSON, updateYFragment, initProseMirrorDoc } from '@tiptap/y-tiptap';
 import { schema, parseMarkdown, serializeMarkdown, filename } from '../shared/editor.js';
-import { defaults, type Settings } from '../shared/types.js';
+import { defaults, normalizeAgentSettings, type Settings } from '../shared/types.js';
 import { persistenceSignature } from '../shared/sync.js';
+import { savedRevisions, type Revision } from '../shared/history.js';
 import { hashPassword, verifyPassword, hashToken, token, cookieValue, validatePassword } from './auth.js';
 
 function arg(name: string, fallback: string) { const at = process.argv.indexOf(`--${name}`); return at < 0 ? fallback : process.argv[at + 1]; }
-const storage = path.resolve(arg('storage', '/documents'));
-const runtime = path.resolve(arg('runtime', '/runtime'));
-const publicDir = path.resolve(arg('public', new URL('./public', import.meta.url).pathname));
-const mongo = new MongoClient(arg('mongo', 'mongodb://mongo:27017/ed'), { serverSelectionTimeoutMS: 3000 });
+const storage = path.resolve(arg('storage', './data/documents'));
+const runtime = path.resolve(arg('runtime', './data/runtime'));
+const publicDir = path.resolve(arg('public', fileURLToPath(new URL('./public', import.meta.url))));
+const mongo = new MongoClient(arg('mongo', 'mongodb://127.0.0.1:27018/ed'), { serverSelectionTimeoutMS: 3000 });
 await mongo.connect();
 const db = mongo.db();
 const docs = db.collection<any>('documents');
@@ -37,8 +40,12 @@ await Promise.all([
 await users.updateOne({ _id: 'bootstrap-admin' }, { $setOnInsert: { username: 'admin', password: await hashPassword('password'), admin: true, mustChangePassword: true } }, { upsert: true });
 await settingsCollection.updateOne({ _id: 'app' }, { $setOnInsert: { value: defaults } }, { upsert: true });
 let settings: Settings = (await settingsCollection.findOne({ _id: 'app' }))!.value;
+settings.agent = normalizeAgentSettings(settings.agent);
+const modelCatalog = createModelCatalog();
+function refreshModels() { for (const provider of ['claude', 'codex'] as const) void modelCatalog.get(provider, settings.agent[`${provider}Path`], settings.agent.cwd); }
+refreshModels();
 await Promise.all([mkdir(storage, { recursive: true }), mkdir(runtime, { recursive: true }), mkdir(path.join(storage, '.trash'), { recursive: true })]);
-await jobs.updateMany({ status: { $in: ['running', 'queued'] } }, { $set: { status: 'interrupted', error: 'App restarted. Review completed actions before retrying.' } });
+await jobs.updateMany({ status: { $in: ['running', 'queued'] } }, { $set: { status: 'interrupted', error: 'App restarted. Review completed actions before retrying.' }, $unset: { tokenHash: '' } });
 
 const app = express();
 app.disable('x-powered-by');
@@ -132,14 +139,15 @@ app.post('/api/users', async (req, res) => {
   await users.insertOne(user); res.status(201).json(publicUser(user));
 });
 
-async function revision(id: string, markdown: string, reason: string) {
-  await histories.insertOne({ _id: randomUUID(), docId: id, markdown, reason, createdAt: Date.now() });
+async function revision(id: string, previousMarkdown: string, markdown: string, reason: string) {
+  if (previousMarkdown === markdown) return;
+  await histories.insertOne({ _id: randomUUID(), docId: id, markdown, previousMarkdown, reason, createdAt: Date.now() });
   const overflow = await histories.find({ docId: id }).sort({ createdAt: -1 }).skip(settings.revisionLimit).project({ _id: 1 }).toArray();
   if (overflow.length) await histories.deleteMany({ _id: { $in: overflow.map(r => r._id) } });
 }
 async function mirror(id: string) {
   return locked(`mirror:${id}`, async () => {
-    const d = await docs.findOne({ _id: id }); if (!d || d.purgedAt) return;
+    const d = await docs.findOne({ _id: id }); if (!d || d.purgedAt || d.mirrorRevision === d.revision) return;
     const name = filename(d.title, id); const relative = d.deletedAt ? `.trash/${name}` : name;
     const target = path.join(storage, relative); const temp = `${target}.${randomUUID()}.tmp`;
     await writeFile(temp, d.markdown || '', { mode: 0o600 }); await rename(temp, target);
@@ -149,15 +157,19 @@ async function mirror(id: string) {
   });
 }
 function queueMirror(id: string) { mirror(id).catch(error => { console.error('Mirror:', error.message); broadcast('mirror-error', { id, error: 'Markdown mirror unavailable; server copy is retained.' }); }); }
-async function saveDoc(id: string, document: Y.Doc) {
+async function saveDoc(id: string, document: Y.Doc, reason = 'autosave') {
   return locked(id, async () => {
     const existing = await docs.findOne({ _id: id }); if (!existing) return;
     const state = Buffer.from(Y.encodeStateAsUpdate(document));
     const text = docMarkdown(document); const vector = Buffer.from(Y.encodeStateVector(document)).toString('base64');
-    if (!Buffer.from(bytes(existing.state)).equals(state)) {
-      if (existing.markdown !== text) await revision(id, existing.markdown || '', 'autosave');
+    if (existing.markdown !== text) {
+      await revision(id, existing.markdown || '', text, reason);
       const updated = await docs.findOneAndUpdate({ _id: id }, { $set: { state, markdown: text, updatedAt: Date.now() }, $inc: { revision: 1 } }, { returnDocument: 'after' });
       broadcast('document', meta(updated)); queueMirror(id);
+    } else if (!Buffer.from(bytes(existing.state)).equals(state)) {
+      // Keep collaboration clocks/deletions durable without recording a content
+      // save, touching the timestamp, or rewriting the Markdown mirror.
+      await docs.updateOne({ _id: id }, { $set: { state } });
     }
     (document as any).broadcastStateless?.(JSON.stringify({ type: 'persisted', vector, stateHash: hashToken(persistenceSignature(state)) }));
     return vector;
@@ -216,11 +228,12 @@ app.patch('/api/documents/:id', async (req, res) => {
     if (d.ops.includes(req.body.opId)) return d;
     if (d.purgedAt) fail(410, 'This document has passed its trash retention period.');
     const change: any = { updatedAt: Date.now() };
-    if ('title' in req.body) change.title = titleValue(req.body.title);
+    if ('title' in req.body) { const title = titleValue(req.body.title); if (title !== d.title) change.title = title; }
     if ('deleted' in req.body) {
       if (typeof req.body.deleted !== 'boolean') fail(400, 'Invalid deletion operation.');
-      change.deletedAt = req.body.deleted ? Date.now() : null;
+      if (Boolean(d.deletedAt) !== req.body.deleted) change.deletedAt = req.body.deleted ? Date.now() : null;
     }
+    if (Object.keys(change).length === 1) return d;
     return docs.findOneAndUpdate({ _id: id }, { $set: change, $push: { ops: req.body.opId }, $inc: { revision: 1 } }, { returnDocument: 'after' });
   });
   if (d.deletedAt) collab.closeConnections(id);
@@ -230,28 +243,32 @@ app.get('/api/documents/:id/state', async (req, res) => {
   const d = await docs.findOne({ _id: req.params.id }); if (!d) fail(404, 'Document not found.');
   res.json({ ...meta(d), state: Buffer.from(bytes(d.state)).toString('base64'), markdown: d.markdown });
 });
-app.get('/api/documents/:id/revisions', async (req, res) => res.json(await histories.find({ docId: req.params.id }).sort({ createdAt: -1 }).toArray()));
+async function documentRevisions(id: string) {
+  const current = await docs.findOne({ _id: id }); if (!current) fail(404, 'Document not found.');
+  const entries = await histories.find({ docId: id }).sort({ createdAt: 1 }).toArray();
+  return savedRevisions(entries as Revision[], current.markdown || '');
+}
+app.get('/api/documents/:id/revisions', async (req, res) => res.json(await documentRevisions(String(req.params.id))));
 async function changeMarkdown(id: string, text: string, expected: string | undefined, reason: string) {
   validId(id); if (typeof text !== 'string' || Buffer.byteLength(text) > 2 * 1024 * 1024) fail(400, 'Markdown must be text smaller than 2 MB.');
   const json = parseMarkdown(text); const node = schema.nodeFromJSON(json); node.check();
   const direct = await collab.openDirectConnection(id, { internal: true });
   try {
     const doc = direct.document!;
-    const before = docMarkdown(doc);
-    await revision(id, before, reason);
     await direct.transact(doc => {
       if (expected && expected !== contentVersion(doc)) fail(409, 'Document changed. Read its current contents and retry.');
+      if (docMarkdown(doc) === serializeMarkdown(json)) return;
       const fragment = doc.getXmlFragment('default'); const { mapping } = initProseMirrorDoc(fragment, schema);
       updateYFragment(doc, fragment, node, { mapping, isOMark: new Map() });
     });
-    await saveDoc(id, doc);
+    await saveDoc(id, doc, reason);
     return { id, version: contentVersion(doc), markdown: docMarkdown(doc) };
   } finally { await direct.disconnect(); }
 }
 app.post('/api/documents/:id/restore', async (req, res) => {
-  const r = await histories.findOne({ _id: req.body.revisionId, docId: req.params.id }); if (!r) fail(404, 'Revision not found.');
+  const r = (await documentRevisions(String(req.params.id))).find(entry => entry._id === req.body.revisionId); if (!r) fail(404, 'Revision not found.');
   if (typeof req.body.version !== 'string') fail(400, 'A current content version is required.');
-  res.json(await changeMarkdown(String(req.params.id), r.markdown, req.body.version, 'before restore'));
+  res.json(await changeMarkdown(String(req.params.id), r.markdown, req.body.version, 'restore'));
 });
 app.get('/api/documents/:id/content', async (req, res) => {
   const direct = await collab.openDirectConnection(String(req.params.id), { internal: true });
@@ -273,40 +290,56 @@ app.patch('/api/preferences', async (req, res) => {
   res.json({ ok: true });
 });
 app.get('/api/settings', (_req, res) => res.json(settings));
+app.post('/api/agent-models', async (req, res) => {
+  const { provider, executable, cwd = settings.agent.cwd, refresh = false } = req.body;
+  if (!['claude', 'codex'].includes(provider) || typeof executable !== 'string' || !executable.trim() || executable.length > 1024 || executable.includes('\0') || typeof cwd !== 'string' || cwd.length > 1024 || cwd.includes('\0')) fail(400, 'Choose an agent and a valid executable path.');
+  res.json(await modelCatalog.get(provider, executable.trim(), cwd, refresh === true));
+});
 app.put('/api/settings', async (req, res) => {
   const next: Settings = req.body;
   if (!Number.isInteger(next.idleMs) || next.idleMs < 100 || next.idleMs > 10000 || !Number.isInteger(next.maxSaveMs) || next.maxSaveMs < next.idleMs || next.maxSaveMs > 30000) fail(400, 'Invalid autosave timing.');
   if (!Number.isInteger(next.revisionLimit) || next.revisionLimit < 1 || next.revisionLimit > 1000 || !Number.isInteger(next.trashDays) || next.trashDays < 1 || next.trashDays > 3650) fail(400, 'Invalid retention setting.');
   if (!next.agent || !['claude', 'codex'].includes(next.agent.provider) || !Number.isInteger(next.agent.timeoutMinutes) || next.agent.timeoutMinutes < 1 || next.agent.timeoutMinutes > 240) fail(400, 'Invalid agent settings.');
-  for (const key of ['claudePath', 'codexPath', 'cwd', 'model'] as const) if (typeof next.agent[key] !== 'string' || next.agent[key].length > 1024 || next.agent[key].includes('\0')) fail(400, 'Invalid agent configuration.');
+  for (const key of ['claudePath', 'codexPath', 'cwd', 'claudeModel', 'codexModel'] as const) if (typeof next.agent[key] !== 'string' || next.agent[key].length > 1024 || next.agent[key].includes('\0')) fail(400, 'Invalid agent configuration.');
   if (typeof next.httpsAddress !== 'string' || (next.httpsAddress && !/^[a-zA-Z0-9.:-]+$/.test(next.httpsAddress))) fail(400, 'Enter a hostname or IP address without a URL scheme.');
   settings = { idleMs: next.idleMs, maxSaveMs: next.maxSaveMs, trashDays: next.trashDays, revisionLimit: next.revisionLimit, httpsAddress: next.httpsAddress, agent: next.agent };
   await settingsCollection.updateOne({ _id: 'app' }, { $set: { value: settings } });
   collab.configure({ debounce: settings.idleMs, maxDebounce: settings.maxSaveMs });
-  await configureHttps(); res.json(settings);
+  refreshModels(); await configureHttps(); res.json(settings);
 });
 async function configureHttps() {
   const host = settings.httpsAddress || 'localhost';
-  const config = `${host} {\n tls internal\n reverse_proxy app:7777\n}\n:8082 {\n root * /data/caddy/pki/authorities/local\n rewrite * /root.crt\n file_server\n}\n`;
-  await writeFile(path.join(runtime, 'Caddyfile'), config);
-  // The Caddy service watches its generated configuration with --watch.
+  const caddyData = path.resolve(arg('caddy-data', './data/caddy-host'));
+  const config = `{
+ admin off
+ auto_https disable_redirects
+ skip_install_trust
+ storage file_system {
+  root ${JSON.stringify(caddyData)}
+ }
+}
+https://${host}:8443 {
+ tls internal
+ reverse_proxy 127.0.0.1:${Number(arg('port', '7777'))}
+}
+`;
+  const configPath = path.join(runtime, 'Caddyfile');
+  await writeFile(`${configPath}.tmp`, config); await rename(`${configPath}.tmp`, configPath);
+  // The optional host Caddy service watches this generated configuration.
 }
 await configureHttps();
 app.get('/api/certificate', async (_req, res) => {
-  const pem = await fetch('http://https:8082/root.crt').then(async r => r.ok ? Buffer.from(await r.arrayBuffer()) : null).catch(() => null);
+  const pem = await readFile(path.resolve(arg('caddy-data', './data/caddy-host'), 'pki/authorities/local/root.crt')).catch(() => null);
   if (!pem) fail(503, 'Certificate is not ready. Start the HTTPS service first.');
   res.setHeader('Content-Disposition', 'attachment; filename="garnet-local-ca.crt"'); res.type('application/x-x509-ca-cert').send(pem);
 });
 
-function runnerRequest(route: string, body?: any): Promise<any> {
-  return new Promise((resolve, reject) => {
-    const req = httpRequest({ socketPath: path.join(runtime, 'runner.sock'), path: route, method: body ? 'POST' : 'GET', headers: { 'Content-Type': 'application/json' }, timeout: 5000 }, res => {
-      let raw = ''; res.on('data', chunk => raw += chunk); res.on('end', () => { try { const result = JSON.parse(raw); res.statusCode! >= 400 ? reject(new Error(result.error)) : resolve(result); } catch { reject(new Error('Invalid runner response')); } });
-    });
-    req.on('error', reject); req.on('timeout', () => req.destroy(new Error('Host runner timed out'))); req.end(body ? JSON.stringify(body) : undefined);
-  });
-}
-app.get('/api/runner', async (_req, res) => { try { res.json(await runnerRequest('/health')); } catch { res.json({ ok: false, error: 'Host runner is not connected.' }); } });
+const runner = createAgentRunner(runtime, async (secret, event) => {
+  const job = await jobs.findOne({ tokenHash: hashToken(secret), status: { $in: ['running', 'queued'] } });
+  if (!job) throw new Error('Job is not active.');
+  await recordAgentEvent(job, event);
+});
+app.get('/api/runner', (_req, res) => res.json(runner.health()));
 app.get('/api/conversations', async (_req, res) => res.json(await conversations.find().sort({ updatedAt: -1 }).limit(100).toArray()));
 app.get('/api/conversations/:id/jobs', async (req, res) => res.json(await jobs.find({ conversationId: req.params.id }, { projection: { tokenHash: 0 } }).sort({ createdAt: 1 }).toArray()));
 app.post('/api/jobs', async (req, res) => {
@@ -322,15 +355,15 @@ app.post('/api/jobs', async (req, res) => {
     await jobs.insertOne(job);
     await conversations.updateOne({ _id: conversationId }, { $set: { provider, updatedAt: Date.now() }, $setOnInsert: { title: req.body.prompt.slice(0, 70) } }, { upsert: true });
     try {
-      await runnerRequest('/run', { id, conversationId, provider, prompt: job.prompt, docId: job.docId, sessionId: conversation?.sessionId, secret, settings: settings.agent });
+      await runner.start({ id, provider, prompt: job.prompt, docId: job.docId, sessionId: conversation?.sessionId, secret, settings: settings.agent });
       await jobs.updateOne({ _id: id, status: 'queued' }, { $set: { status: 'running' } });
     } catch (error: any) { await jobs.updateOne({ _id: id }, { $set: { status: 'failed', error: error.message } }); }
     res.status(202).json({ id, conversationId });
   });
 });
-app.post('/api/jobs/:id/cancel', async (req, res) => { await runnerRequest('/cancel', { id: req.params.id }); res.json({ ok: true }); });
+app.post('/api/jobs/:id/cancel', async (req, res) => { runner.cancel(String(req.params.id)); res.json({ ok: true }); });
 
-// Runner callbacks/tools use a private Unix socket, never a public unauthenticated route.
+// Agent CLI document tools use a private, authenticated Unix socket.
 const internal = express(); internal.use(express.json({ limit: '12mb' }));
 internal.use(async (req, res, next) => {
   const raw = req.headers.authorization?.replace(/^Bearer /, '');
@@ -338,16 +371,15 @@ internal.use(async (req, res, next) => {
   if (!job) return res.status(401).json({ error: 'Job is not active.' });
   res.locals.job = job; next();
 });
-internal.post('/event', async (req, res) => {
-  const job = res.locals.job; const event = req.body;
-  if (event.type === 'heartbeat') { await jobs.updateOne({ _id: job._id }, { $set: { heartbeatAt: Date.now() } }); res.json({ ok: true }); return; }
+async function recordAgentEvent(job: any, event: any) {
+  if (event.type === 'heartbeat') { await jobs.updateOne({ _id: job._id }, { $set: { heartbeatAt: Date.now() } }); return; }
   if (JSON.stringify(event).length > 100000) fail(400, 'Agent event too large.');
   if (event.type === 'text' && typeof event.text === 'string') await jobs.updateOne({ _id: job._id }, [{ $set: { output: { $concat: [{ $ifNull: ['$output', ''] }, { $literal: event.text }] } } }]);
   await jobs.updateOne({ _id: job._id }, { $push: { events: { $each: [event], $slice: -2000 } } } as any);
   if (event.sessionId) await conversations.updateOne({ _id: job.conversationId }, { $set: { sessionId: event.sessionId } });
   if (event.type === 'done') await jobs.updateOne({ _id: job._id }, { $set: { status: event.status, error: event.error || null, finishedAt: Date.now() }, $unset: { tokenHash: '' } });
-  broadcast('agent', { jobId: job._id, conversationId: job.conversationId, ...event }); res.json({ ok: true });
-});
+  broadcast('agent', { jobId: job._id, conversationId: job.conversationId, ...event });
+}
 internal.post('/tool', async (req, res) => {
   const { name, arguments: args = {} } = req.body;
   if (name === 'list_documents' || name === 'search_documents') {
@@ -380,7 +412,7 @@ internal.post('/tool', async (req, res) => {
       if (typeof args.find !== 'string' || !args.find || typeof args.replace !== 'string' || current.split(args.find).length !== 2) fail(409, 'Find text must match exactly once. Read and retry.');
       next = current.replace(args.find, () => args.replace);
     }
-    return res.json(await changeMarkdown(args.id, next, args.version, 'before agent edit'));
+    return res.json(await changeMarkdown(args.id, next, args.version, 'agent edit'));
   }
   fail(400, 'Unknown document tool.');
 });
@@ -398,7 +430,7 @@ app.get('/{*path}', (_req, res) => res.sendFile(path.join(publicDir, 'index.html
 app.use(errorHandler);
 const maintenance = setInterval(async () => {
   try {
-    await jobs.updateMany({ status: 'running', createdAt: { $lt: Date.now() - 120000 }, $or: [{ heartbeatAt: { $lt: Date.now() - 120000 } }, { heartbeatAt: { $exists: false } }] }, { $set: { status: 'interrupted', error: 'Runner stopped responding. Review completed actions before retrying.' }, $unset: { tokenHash: '' } });
+    await jobs.updateMany({ status: 'running', createdAt: { $lt: Date.now() - 120000 }, $or: [{ heartbeatAt: { $lt: Date.now() - 120000 } }, { heartbeatAt: { $exists: false } }] }, { $set: { status: 'interrupted', error: 'Agent stopped responding. Review completed actions before retrying.' }, $unset: { tokenHash: '' } });
     for (const d of await docs.find().toArray()) {
       if (d.mirrorRevision !== d.revision) queueMirror(d._id);
       if (d.deletedAt && !d.purgedAt && d.deletedAt < Date.now() - settings.trashDays * 86400000) {
@@ -412,6 +444,7 @@ const maintenance = setInterval(async () => {
   } catch (error: any) { console.error('Maintenance:', error.message); }
 }, 30000);
 for (const d of await docs.find().toArray()) queueMirror(d._id);
-server.listen(Number(arg('port', '7777')), '0.0.0.0', () => console.log(`Garnet listening on ${arg('port', '7777')}`));
-async function shutdown() { clearInterval(maintenance); server.close(); for (const doc of collab.documents.values()) await saveDoc(doc.name, doc); for (const res of subscribers) res.end(); collab.closeConnections(); await Promise.allSettled([...serial.values()]); internalServer.close(); await mongo.close(); process.exit(0); }
+server.listen(Number(arg('port', '7777')), arg('host', '127.0.0.1'), () => console.log(`Garnet listening on ${arg('port', '7777')}`));
+let shuttingDown = false;
+async function shutdown() { if (shuttingDown) return; shuttingDown = true; clearInterval(maintenance); server.close(); await Promise.all([modelCatalog.close(), runner.shutdown()]); for (const doc of collab.documents.values()) await saveDoc(doc.name, doc); for (const res of subscribers) res.end(); collab.closeConnections(); await Promise.allSettled([...serial.values()]); internalServer.close(); await mongo.close(); process.exit(0); }
 process.on('SIGTERM', shutdown); process.on('SIGINT', shutdown);

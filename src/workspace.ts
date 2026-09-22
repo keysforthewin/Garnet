@@ -8,6 +8,7 @@ import { absolutePositionToRelativePosition, relativePositionToAbsolutePosition,
 import { extensions, schema, parseMarkdown, serializeMarkdown, filename } from '../shared/editor';
 import type { User, DocMeta } from '../shared/types';
 import { persistenceSignature } from '../shared/sync';
+import { diffLines, type SavedRevision } from '../shared/history';
 import { api, csrf, setCsrf, toast, escape, dialog, download } from './api';
 import * as cache from './db';
 
@@ -19,12 +20,12 @@ const opened = new Map<string, OpenDoc>();
 let user: User; let editor: Editor | undefined; let activeId = ''; let currentOpen = 0;
 let prefs: Record<string, any> = {}; let preferenceTimer: ReturnType<typeof setTimeout>; let changedPrefs: Record<string, any> = {};
 let syncRunning = false; let syncAgain = false; let online = navigator.onLine; let events: EventSource | undefined; let searchQuery = ''; let matches: Set<string> | null = null;
-let localError = false; let operationsPending = 0; let showingTrash = false;
+let localError = false; let showingTrash = false;
 const worker = new Worker(new URL('./search.worker.ts', import.meta.url), { type: 'module' });
 const b64 = (bytes: Uint8Array) => { let text = ''; for (const byte of bytes) text += String.fromCharCode(byte); return btoa(text); };
 const unb64 = (text: string) => Uint8Array.from(atob(text), ch => ch.charCodeAt(0));
 const $ = <T extends HTMLElement = HTMLElement>(selector: string) => document.querySelector<T>(selector)!;
-function localFailure(error: any) { localError = true; status('Local storage failed'); toast(`Local storage: ${error.message}. Export your notes before closing this page.`); }
+function localFailure(error: any) { localError = true; status('local-error'); toast(`Local storage: ${error.message}. Export your notes before closing this page.`); }
 async function persist(record: CachedDoc) { try { await cache.put('docs', record.id, { ...record }); } catch (error) { localFailure(error); throw error; } }
 function markPreference(key: string, value: any) {
   prefs[key] = value; changedPrefs[key] = value;
@@ -39,15 +40,28 @@ export async function start(account: User) {
   for (const record of await cache.all<CachedDoc>('docs')) records.set(record.id, record);
   prefs = await cache.get('prefs', 'values') || {};
   document.documentElement.dataset.theme = prefs.theme || 'system';
-  $('#app').innerHTML = `<div class="workspace ${prefs.sidebarCollapsed ? 'sidebar-collapsed' : ''}"><aside id="sidebar"><div class="sidebar-top"><a href="#" class="wordmark" aria-label="Garnet home">Garnet</a><button id="collapse" class="icon-button" title="Collapse sidebar (Ctrl+\\)" aria-label="Collapse sidebar">«</button></div><button id="new-doc" class="new-button"><span>+</span> New document <kbd>Alt N</kbd></button><label class="search-label"><span class="sr-only">Search documents</span><input id="search" type="search" placeholder="Search your notes…" autocomplete="off"><kbd>⌘ K</kbd></label><div class="list-heading"><span id="list-label">YOUR DOCUMENTS</span><span id="doc-count"></span></div><nav id="doc-list" aria-label="Documents"></nav><div class="sidebar-bottom"><button id="trash-button">Trash</button><button id="settings-button">Settings</button><button id="account-button" title="Account">${escape(user.username)}</button></div><div id="cache-status" class="cache-status">Loading local library…</div></aside><main id="main"><header class="document-header"><button id="expand" class="icon-button" title="Show sidebar" aria-label="Show sidebar">»</button><span id="breadcrumb">Your notes</span><div class="header-actions"><span id="save-status" role="status"></span><button id="export-button" disabled>Export</button><button id="more-button" disabled aria-label="Document options">•••</button><button id="ai-button" class="ai-button">Ask AI <kbd>⌘ J</kbd></button></div></header><div id="empty"><div class="empty-mark">Garnet</div><h1>Room to think.</h1><p>A quick note, a rough idea, a shared draft.<br>Choose a document or start a fresh page.</p><button class="primary" id="empty-new">New document</button></div><section id="document" hidden><input id="document-title" aria-label="Document title" placeholder="Untitled" maxlength="200"><div id="toolbar" role="toolbar" aria-label="Formatting"><button data-command="bold" title="Bold (Ctrl+B)"><strong>B</strong></button><button data-command="italic" title="Italic (Ctrl+I)"><em>I</em></button><button data-command="strike" title="Strikethrough"><s>S</s></button><span class="toolbar-divider"></span><button data-command="heading" title="Heading">H2</button><button data-command="bulletList" title="Bullet list">List</button><button data-command="orderedList" title="Numbered list">1.</button><button data-command="taskList" title="Checklist">Tasks</button><button data-command="blockquote" title="Quote">Quote</button><button data-command="codeBlock" title="Code block">Code</button><button data-command="link" title="Insert link">Link</button><button data-command="table" title="Insert table">Table</button><span class="toolbar-divider"></span><button data-command="undo" title="Undo">↶</button><button data-command="redo" title="Redo">↷</button></div><div id="editor-mount"></div><footer class="document-footer"><span id="word-count"></span><span id="people"></span></footer></section></main><aside id="ai-panel" hidden></aside></div>`;
-  $('#new-doc').onclick = () => void newDocument(); $('#empty-new').onclick = () => void newDocument();
-  $('#collapse').onclick = () => toggleSidebar(true); $('#expand').onclick = () => toggleSidebar(false);
+  $('#app').innerHTML = `<div class="workspace ${prefs.sidebarCollapsed ? 'sidebar-collapsed' : ''}"><aside id="sidebar"><div class="sidebar-top"><a href="#" class="wordmark" aria-label="Garnet home">Garnet</a><button id="collapse" class="icon-button" title="Collapse sidebar (Ctrl+\\)" aria-label="Collapse sidebar">«</button></div><label class="search-label"><span class="sr-only">Search documents</span><input id="search" type="search" placeholder="Search your notes…" autocomplete="off"><kbd>⌘ K</kbd></label><div class="list-heading"><span id="list-label">YOUR DOCUMENTS</span><span id="doc-count"></span></div><nav id="doc-list" aria-label="Documents"></nav><div class="sidebar-bottom"><button id="trash-button">Trash</button><button id="settings-button">Settings</button><button id="account-button" title="Account">${escape(user.username)}</button></div><div id="sync-error" class="sync-error" hidden></div></aside><main id="main"><header class="document-header"><div class="document-menu"><button id="menu-button" class="icon-button" aria-label="Open menu" aria-expanded="false" aria-controls="document-menu"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button><div id="document-menu" class="menu-dropdown" hidden></div></div><div class="header-actions"><button id="ai-button" class="ai-button">Ask AI <kbd>⌘ J</kbd></button></div></header><div id="empty"><div class="empty-mark">Garnet</div><h1>Room to think.</h1><p>A quick note, a rough idea, a shared draft.<br>Choose a document or start a fresh page.</p><button class="primary" id="empty-new">New document</button></div><section id="document" hidden><input id="document-title" aria-label="Document title" placeholder="Untitled" maxlength="200"><div id="toolbar" role="toolbar" aria-label="Formatting"><button data-command="bold" title="Bold (Ctrl+B)"><strong>B</strong></button><button data-command="italic" title="Italic (Ctrl+I)"><em>I</em></button><button data-command="strike" title="Strikethrough"><s>S</s></button><span class="toolbar-divider"></span><button data-command="heading" title="Heading">H2</button><button data-command="bulletList" title="Bullet list">List</button><button data-command="orderedList" title="Numbered list">1.</button><button data-command="taskList" title="Checklist">Tasks</button><button data-command="blockquote" title="Quote">Quote</button><button data-command="codeBlock" title="Code block">Code</button><button data-command="link" title="Insert link">Link</button><button data-command="table" title="Insert table">Table</button><span class="toolbar-divider"></span><button data-command="undo" title="Undo">↶</button><button data-command="redo" title="Redo">↷</button></div><div id="editor-mount"></div><footer class="document-footer"><span id="word-count"></span><span id="people"></span></footer></section></main><aside id="ai-panel" hidden></aside></div>`;
+  $('#empty-new').onclick = () => void newDocument();
+  $('#collapse').onclick = () => toggleSidebar(true);
   $('#search').oninput = () => { searchQuery = ($<HTMLInputElement>('#search')).value; worker.postMessage({ type: 'search', query: searchQuery }); };
   worker.onmessage = ({ data }) => { if (data.query === searchQuery) { matches = searchQuery.trim() ? new Set(data.ids) : null; renderList(); } };
   $('#trash-button').onclick = () => { showingTrash = !showingTrash; $('#trash-button').classList.toggle('selected', showingTrash); renderList(); };
   $('#settings-button').onclick = () => void import('./settings').then(m => m.showSettings({ user, prefs, markPreference, exportAll, importFiles, account: showAccount }));
   $('#account-button').onclick = showAccount;
-  $('#export-button').onclick = () => void exportOne(); $('#more-button').onclick = documentOptions;
+  $('#menu-button').onclick = () => { if ($('#document-menu').hidden) documentOptions(); else closeMenu(); };
+  document.addEventListener('pointerdown', e => { if (!(e.target as Element).closest('.document-menu')) closeMenu(false); });
+  $('.document-menu').addEventListener('focusout', e => { if (!(e.currentTarget as HTMLElement).contains((e as FocusEvent).relatedTarget as Node | null)) closeMenu(false); });
+  $('.document-menu').addEventListener('keydown', e => {
+    if (e.key === 'Escape') { e.preventDefault(); closeMenu(); }
+    if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(e.key)) {
+      e.preventDefault();
+      if ($('#document-menu').hidden) documentOptions();
+      const buttons = [...$('#document-menu').querySelectorAll<HTMLButtonElement>('button:not(:disabled)')];
+      const current = buttons.indexOf(document.activeElement as HTMLButtonElement);
+      const index = e.key === 'Home' ? 0 : e.key === 'End' ? buttons.length - 1 : (current + (e.key === 'ArrowDown' ? 1 : current < 0 ? 0 : -1) + buttons.length) % buttons.length;
+      buttons[index]?.focus();
+    }
+  });
   $('#ai-button').onclick = () => void toggleAI();
   $('#document-title').oninput = () => {
     const id = activeId; const record = records.get(id)!; record.title = $<HTMLInputElement>('#document-title').value || 'Untitled';
@@ -66,7 +80,7 @@ export async function start(account: User) {
   });
   document.addEventListener('visibilitychange', () => { if (document.hidden) { saveCursor(); void flushLocal(); opened.get(activeId)?.provider?.sendStateless('flush'); } });
   window.addEventListener('beforeunload', e => { if (localError) { e.preventDefault(); e.returnValue = ''; } });
-  window.addEventListener('offline', () => { online = false; status(); cacheStatus(); });
+  window.addEventListener('offline', () => { online = false; status(); });
   window.addEventListener('online', () => { void synchronize(); });
   renderList(); worker.postMessage({ type: 'index', docs: [...records.values()] });
   const hashId = location.hash.slice(1); const initial = hashId || prefs.lastDocument;
@@ -76,29 +90,30 @@ export async function start(account: User) {
   setInterval(() => void synchronize(), 20000);
 }
 function toggleSidebar(collapsed: boolean) { $('.workspace').classList.toggle('sidebar-collapsed', collapsed); markPreference('sidebarCollapsed', collapsed); }
-function status(message?: string) {
-  if (!activeId) { $('#save-status').textContent = online ? '' : 'Offline'; return; }
+function status(message?: 'local-error' | 'saving' | 'auth-required') {
+  if (!activeId) { $('#main').dataset.saveState = online ? 'idle' : 'offline'; return; }
   const d = records.get(activeId)!;
-  $('#save-status').textContent = message || (localError ? 'Local storage failed' : !online ? 'Saved locally · offline' : d.dirty || d.localOnly ? 'Saved locally · syncing' : 'Saved to server');
-}
-function cacheStatus() {
-  const docs = [...records.values()].filter(d => !d.deletedAt); const cached = docs.filter(d => d.state !== undefined).length;
-  $('#cache-status').textContent = `${online ? '' : 'Offline · '}${cached}/${docs.length} available offline${operationsPending ? ` · ${operationsPending} pending` : ''}`;
+  $('#main').dataset.saveState = message || (localError ? 'local-error' : !online ? 'offline' : d.dirty || d.localOnly ? 'syncing' : 'saved');
 }
 function renderList() {
   const pins = prefs.pins || [];
   const docs = [...records.values()].filter(d => !d.purgedAt && Boolean(d.deletedAt) === showingTrash && (!matches || matches.has(d.id))).sort((a, b) => Number(pins.includes(b.id)) - Number(pins.includes(a.id)) || b.updatedAt - a.updatedAt);
   $('#list-label').textContent = showingTrash ? 'TRASH' : searchQuery ? 'SEARCH RESULTS' : 'YOUR DOCUMENTS'; $('#doc-count').textContent = String(docs.length);
-  $('#doc-list').innerHTML = docs.length ? docs.map(d => `<button class="doc-row ${d.id === activeId ? 'active' : ''}" data-id="${d.id}" ${d.id === activeId ? 'aria-current="page"' : ''}><span class="document-glyph" aria-hidden="true">${pins.includes(d.id) ? '·' : '≡'}</span><span class="doc-name">${escape(d.title)}</span>${d.dirty || d.localOnly ? '<span class="pending-dot" title="Pending sync"></span>' : ''}</button>`).join('') : `<p class="list-empty">${searchQuery ? 'No matching documents.' : showingTrash ? 'Trash is empty.' : 'Your first note starts here.'}</p>`;
+  $('#doc-list').innerHTML = docs.length ? docs.map(d => `<div class="doc-item ${d.id === activeId ? 'active' : ''}"><button class="doc-row ${d.id === activeId ? 'active' : ''}" data-id="${d.id}" ${d.id === activeId ? 'aria-current="page"' : ''}><span class="document-glyph" aria-hidden="true">≡</span><span class="doc-name">${escape(d.title)}</span>${d.dirty || d.localOnly ? '<span class="pending-dot" title="Pending sync"></span>' : ''}</button>${showingTrash ? '' : `<button class="pin-button" data-pin="${d.id}" aria-label="${pins.includes(d.id) ? 'Unpin' : 'Pin'} ${escape(d.title)}" aria-pressed="${pins.includes(d.id)}" title="${pins.includes(d.id) ? 'Unpin' : 'Pin to top'}"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 3h6v6l3 3v3H6v-3l3-3V3M12 15v6"/></svg></button>`}</div>`).join('') : `<p class="list-empty">${searchQuery ? 'No matching documents.' : showingTrash ? 'Trash is empty.' : 'Your first note starts here.'}</p>`;
   $('#doc-list').querySelectorAll<HTMLButtonElement>('[data-id]').forEach(button => button.onclick = () => {
     if (showingTrash) { const id = button.dataset.id!; const d = dialog('Restore document', `<p>${escape(records.get(id)!.title)}</p><button class="primary" id="restore-trash">Restore</button>`); d.querySelector('#restore-trash')!.addEventListener('click', () => { void setDeleted(id, false); d.close(); }); }
     else void openDocument(button.dataset.id!);
   });
-  cacheStatus();
+  $('#doc-list').querySelectorAll<HTMLButtonElement>('[data-pin]').forEach(button => button.onclick = () => {
+    const id = button.dataset.pin!;
+    markPreference('pins', pins.includes(id) ? pins.filter((pin: string) => pin !== id) : [...pins, id]);
+    renderList(); $('#doc-list').querySelector<HTMLButtonElement>(`[data-pin="${id}"]`)?.focus();
+  });
+
 }
 async function enqueue(url: string, method: string, body: any) {
   const operation: Operation = { id: method === 'PATCH' && body.title !== undefined ? `rename-${url.split('/')[2]}` : crypto.randomUUID(), version: crypto.randomUUID(), path: url, method, body, createdAt: Date.now() };
-  try { await cache.put('ops', operation.id, operation); operationsPending++; cacheStatus(); void synchronize(); } catch (error) { localFailure(error); }
+  try { await cache.put('ops', operation.id, operation);  void synchronize(); } catch (error) { localFailure(error); }
 }
 async function newDocument(title = 'Untitled', initialMarkdown?: string) {
   const id = crypto.randomUUID(); const record: CachedDoc = { id, title, createdAt: Date.now(), updatedAt: Date.now(), revision: 0, mirrorRevision: -1, deletedAt: null, localOnly: true, dirty: true };
@@ -106,7 +121,6 @@ async function newDocument(title = 'Untitled', initialMarkdown?: string) {
     const doc = new Y.Doc(); const fragment = doc.getXmlFragment('default');
     updateYFragment(doc, fragment, schema.nodeFromJSON(parseMarkdown(initialMarkdown)), { mapping: initProseMirrorDoc(fragment, schema).mapping, isOMark: new Map() });
     record.state = b64(Y.encodeStateAsUpdate(doc)); record.markdown = serializeMarkdown(yDocToProsemirrorJSON(doc, 'default')); doc.destroy();
-    await cache.put('prefs', `original_${id}`, initialMarkdown);
   }
   records.set(id, record); renderList();
   const persistTask = persist(record); void openDocument(id).then(async () => {
@@ -125,7 +139,7 @@ async function getOpen(id: string): Promise<OpenDoc> {
   doc.on('update', () => {
     entry.generation++; const current = records.get(id); if (!current) return;
     current.dirty = true;
-    if (id === activeId) status('Saving locally…');
+    if (id === activeId) status('saving');
     clearTimeout(entry.timer); entry.timer = setTimeout(() => void saveLocal(id), 60);
   });
   connect(id, entry);
@@ -135,7 +149,7 @@ function connect(id: string, entry: OpenDoc) {
   const record = records.get(id); if (!online || !csrf || entry.provider || record?.localOnly || record?.deletedAt) return;
   const provider = new HocuspocusProvider({ url: `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/collaboration`, name: id, document: entry.doc, token: () => csrf,
     onSynced: () => { provider.sendStateless('flush'); },
-    onAuthenticationFailed: () => { if (id === activeId) status('Sync paused · sign in again'); },
+    onAuthenticationFailed: () => { if (id === activeId) status('auth-required'); },
     onStateless: async ({ payload }) => {
       const event = JSON.parse(payload);
       if (event.type !== 'persisted') return;
@@ -168,7 +182,7 @@ async function openDocument(id: string, focus = true) {
   const entry = await getOpen(id); if (count !== currentOpen) return;
   editor?.destroy(); editor = undefined; activeId = id; markPreference('lastDocument', id); history.replaceState(null, '', `#${id}`);
   $('#empty').hidden = true; $('#document').hidden = false; $<HTMLInputElement>('#document-title').value = record.title;
-  $('#breadcrumb').textContent = 'Your notes'; $<HTMLButtonElement>('#export-button').disabled = false; $<HTMLButtonElement>('#more-button').disabled = false;
+  closeMenu(false);
   $('#editor-mount').replaceChildren();
   editor = new Editor({ element: $('#editor-mount'), extensions: [...extensions(), Collaboration.configure({ document: entry.doc }), ...(entry.provider ? [CollaborationCaret.configure({ provider: entry.provider, user: { name: user.username, color: ['#557a59', '#617daf', '#ab6f47', '#9275a9'][user.username.charCodeAt(0) % 4] } })] : [])], editorProps: { attributes: { class: 'prose', spellcheck: 'true', 'aria-label': 'Document content', 'data-placeholder': 'Start writing…', role: 'textbox', 'aria-multiline': 'true' } },
     onUpdate: () => { updateWordCount(); }, onSelectionUpdate: () => { saveCursor(); updateToolbar(); },
@@ -218,21 +232,21 @@ async function fetchState(id: string) {
   else if (record.dirty && record.state) {
     const doc = new Y.Doc(); Y.applyUpdate(doc, unb64(record.state)); Y.applyUpdate(doc, unb64(remote.state)); record.state = b64(Y.encodeStateAsUpdate(doc)); record.markdown = serializeMarkdown(yDocToProsemirrorJSON(doc, 'default')); doc.destroy(); await persist(record);
   } else { record.state = remote.state; record.markdown = remote.markdown; await persist(record); }
-  worker.postMessage({ type: 'index', docs: [record] }); cacheStatus();
+  worker.postMessage({ type: 'index', docs: [record] });
 }
 async function synchronize() {
   if (syncRunning) { syncAgain = true; return; }
-  if (!navigator.onLine) { cacheStatus(); return; } syncRunning = true; syncAgain = false;
+  if (!navigator.onLine) { return; } syncRunning = true; syncAgain = false;
   try {
-    const me = await api('/me'); if (me.user.id !== user.id) throw new Error('Account changed. Reload this page.'); setCsrf(me.csrf); online = true;
+    const me = await api('/me'); if (me.user.id !== user.id) throw new Error('Account changed. Reload this page.'); setCsrf(me.csrf); online = true; $('#sync-error').hidden = true;
     const pendingCreates = new Set((await cache.all<Operation>('ops')).filter(o => o.path === '/documents').map(o => o.body.id));
     for (const record of records.values()) if (record.localOnly && !pendingCreates.has(record.id)) await enqueue('/documents', 'POST', { id: record.id, title: record.title });
-    const ops = (await cache.all<Operation>('ops')).sort((a, b) => a.createdAt - b.createdAt); operationsPending = ops.length;
+    const ops = (await cache.all<Operation>('ops')).sort((a, b) => a.createdAt - b.createdAt);
     for (const op of ops) {
       try {
         const result = await api(op.path, op.method, op.body);
         if (op.path === '/documents' && records.has(result.id)) { records.get(result.id)!.localOnly = false; await persist(records.get(result.id)!); }
-        if ((await cache.get<Operation>('ops', op.id))?.version === op.version) { await cache.remove('ops', op.id); operationsPending--; }
+        if ((await cache.get<Operation>('ops', op.id))?.version === op.version) { await cache.remove('ops', op.id); }
       } catch (error: any) { if (error.status === 400 || error.status === 404) { toast(`Could not sync an action: ${error.message}`); await cache.put('prefs', `failed_${op.id}`, op); await cache.remove('ops', op.id); } else throw error; }
     }
     const serverPrefs = await api('/preferences'); prefs = { ...serverPrefs, ...prefs }; await cache.put('prefs', 'values', prefs);
@@ -259,12 +273,12 @@ async function synchronize() {
       events.addEventListener('document', e => { const d = JSON.parse((e as MessageEvent).data); const current = records.get(d.id); if (!current || current.revision !== d.revision || current.deletedAt !== d.deletedAt) { setTimeout(() => void synchronize(), 100); } });
       events.addEventListener('mirror-error', e => { const d = JSON.parse((e as MessageEvent).data); toast(d.error); });
       events.addEventListener('agent', e => window.dispatchEvent(new CustomEvent('ed-agent', { detail: JSON.parse((e as MessageEvent).data) })));
-      events.onerror = () => { online = false; status(); cacheStatus(); };
-      events.onopen = () => { online = true; status(); cacheStatus(); };
+      events.onerror = () => { online = false; status(); };
+      events.onopen = () => { online = true; status(); };
     }
     renderList(); status();
   } catch (error: any) {
-    online = false; if (error.status === 401) { status('Sync paused · sign in again'); $('#cache-status').innerHTML = '<button id="reauth">Sign in to sync your local changes</button>'; $('#reauth').onclick = reauthenticate; } else { status(); cacheStatus(); }
+    online = false; if (error.status === 401) { status('auth-required'); $('#sync-error').hidden = false; $('#sync-error').innerHTML = '<button id="reauth">Sign in to sync your local changes</button>'; $('#reauth').onclick = reauthenticate; } else { status(); }
   } finally { syncRunning = false; if (online && (syncAgain || (await cache.all('ops')).length)) setTimeout(() => void synchronize(), 250); }
 }
 async function recoverDeleted(record: CachedDoc) {
@@ -273,7 +287,7 @@ async function recoverDeleted(record: CachedDoc) {
   records.set(id, recovered); await persist(recovered); await enqueue('/documents', 'POST', { id, title: recovered.title }); record.dirty = false;
   toast('A document was deleted elsewhere. Your pending edits were preserved in a recovered note.');
 }
-function closeActive() { editor?.destroy(); editor = undefined; activeId = ''; $('#document').hidden = true; $('#empty').hidden = false; $<HTMLButtonElement>('#export-button').disabled = true; $<HTMLButtonElement>('#more-button').disabled = true; status(); }
+function closeActive() { editor?.destroy(); editor = undefined; activeId = ''; $('#document').hidden = true; $('#empty').hidden = false; closeMenu(false); status(); }
 async function setDeleted(id: string, deleted: boolean) {
   const record = records.get(id)!; await saveLocal(id); record.deletedAt = deleted ? Date.now() : null;
   if (deleted) { opened.get(id)?.provider?.destroy(); if (opened.has(id)) opened.get(id)!.provider = undefined; }
@@ -288,26 +302,49 @@ export async function exportAll() {
 export async function importFiles(files: FileList | File[]) {
   for (const file of Array.from(files)) {
     if (file.size > 2 * 1024 * 1024) { toast(`${file.name} exceeds the 2 MB document limit.`); continue; }
-    const text = await file.text(); const id = await newDocument(file.name.replace(/\.md$/i, ''), text);
-    // Keep the original file locally even when formatting is normalized.
-    await cache.put('prefs', `original_${id}`, text);
+    const text = await file.text(); await newDocument(file.name.replace(/\.md$/i, ''), text);
   }
 }
+function closeMenu(focus = true) {
+  if ($('#document-menu').hidden) return;
+  $('#document-menu').hidden = true;
+  $('#menu-button').setAttribute('aria-expanded', 'false');
+  if (focus) $('#menu-button').focus();
+}
 function documentOptions() {
-  if (!activeId) return; const id = activeId; const record = records.get(id)!; const pins: string[] = prefs.pins || [];
-  const d = dialog('Document', `<p>${escape(record.title)}</p><div class="action-stack"><button id="pin">${pins.includes(id) ? 'Unpin' : 'Pin to top'}</button><button id="history">Version history</button><button id="original">Download original import</button><button id="duplicate">Duplicate document</button><button id="delete" class="danger">Move to trash</button></div>`);
-  d.querySelector('#pin')!.addEventListener('click', () => { markPreference('pins', pins.includes(id) ? pins.filter(p => p !== id) : [...pins, id]); renderList(); d.close(); });
-  d.querySelector('#history')!.addEventListener('click', () => { d.close(); void showHistory(id); });
-  d.querySelector('#original')!.addEventListener('click', async () => { const original = await cache.get('prefs', `original_${id}`); if (original === undefined) toast('No original import is stored on this device.'); else download(`${record.title}-original.md`, original); });
-  d.querySelector('#duplicate')!.addEventListener('click', async () => { await saveLocal(id); d.close(); await newDocument(`${record.title} (copy)`, record.markdown); });
-  d.querySelector('#delete')!.addEventListener('click', () => { d.close(); void setDeleted(id, true); });
+  const id = activeId; const record = records.get(id);
+  const d = $('#document-menu');
+  const disabled = record ? '' : 'disabled';
+  d.innerHTML = `<button id="new-doc" aria-keyshortcuts="Alt+N">New document <kbd>Alt N</kbd></button><hr><button id="toggle-sidebar">${$('.workspace').classList.contains('sidebar-collapsed') ? 'Show' : 'Hide'} sidebar</button><hr><button id="export-button" ${disabled}>Export</button><button id="history" ${disabled}>Version history</button><hr><button id="delete" class="danger" ${disabled}>Move to trash</button>`;
+  const action = (selector: string, run: () => void | Promise<void>) => {
+    d.querySelector(selector)!.addEventListener('click', () => { closeMenu(); Promise.resolve().then(run).catch(error => toast(error.message)); });
+  };
+  action('#new-doc', async () => { await newDocument(); });
+  action('#toggle-sidebar', () => toggleSidebar(!$('.workspace').classList.contains('sidebar-collapsed')));
+  action('#export-button', exportOne);
+  action('#history', () => showHistory(id));
+  action('#delete', () => setDeleted(id, true));
+  d.hidden = false;
+  $('#menu-button').setAttribute('aria-expanded', 'true');
+}
+function revisionDiff(before: string, after: string) {
+  const parts = diffLines(before, after);
+  const lines = (part: typeof parts[number]) => part.lines.map(line => `<span class="diff-line diff-${part.kind}"><span class="diff-sign" aria-label="${part.kind === 'added' ? 'Added' : part.kind === 'removed' ? 'Removed' : 'Unchanged'}">${part.kind === 'added' ? '+' : part.kind === 'removed' ? '−' : ' '}</span><span>${escape(line) || '\u00a0'}</span></span>`).join('');
+  return parts.map((part, index) => {
+    if (part.kind === 'removed' && parts[index + 1]?.kind === 'added') return `<span class="diff-change" aria-label="Changed passage">${lines(part)}${lines(parts[index + 1])}</span>`;
+    if (part.kind === 'added' && parts[index - 1]?.kind === 'removed') return '';
+    return lines(part);
+  }).join('');
 }
 async function showHistory(id: string) {
   try {
-    const revisions = await api(`/documents/${id}/revisions`);
-    const d = dialog('Version history', `<p class="muted">Restoring creates a new shared edit. Your current version is retained.</p><div class="history-list">${revisions.length ? revisions.map((r: any) => `<button data-revision="${r._id}"><span>${escape(new Date(r.createdAt).toLocaleString())}</span><small>${escape(r.reason)}</small></button>`).join('') : '<p>No earlier versions yet.</p>'}</div>`);
+    await flushActive();
+    const revisions = await api<SavedRevision[]>(`/documents/${id}/revisions`);
+    const d = dialog('Version history', `<p class="muted">Each version shows what changed from the previous save. Restoring adds a new version only if the content differs.</p><div class="history-list">${revisions.length ? revisions.map((r: any) => `<button data-revision="${r._id}"><span>${escape(new Date(r.createdAt).toLocaleString())}</span><small>${escape(r.reason)}</small></button>`).join('') : '<p>No saved changes yet.</p>'}</div>`);
     d.querySelectorAll<HTMLButtonElement>('[data-revision]').forEach(button => button.onclick = () => {
-      const revision = revisions.find((r: any) => r._id === button.dataset.revision); const preview = dialog('Earlier version', `<pre class="revision-preview">${escape(revision.markdown)}</pre><button class="primary" id="apply-revision">Restore this version</button>`);
+      const revision = revisions.find(r => r._id === button.dataset.revision)!;
+      const preview = dialog('Saved version', `<p class="muted">${escape(new Date(revision.createdAt).toLocaleString())} · Compared with the previous save</p><div class="diff-legend"><span class="diff-added">+ Added</span><span class="diff-removed">− Removed</span><span class="diff-change">Changed passage</span></div><div class="revision-preview" aria-label="Changes in this version">${revisionDiff(revision.previousMarkdown, revision.markdown)}</div><button class="primary" id="apply-revision">Restore this version</button>`);
+      preview.classList.add('revision-dialog');
       preview.querySelector('#apply-revision')!.addEventListener('click', async () => { try { await flushActive(); const current = await api(`/documents/${id}/content`); await api(`/documents/${id}/restore`, 'POST', { revisionId: revision._id, version: current.version }); preview.close(); d.close(); } catch (error: any) { toast(error.message); } });
     });
   } catch (error: any) { toast(error.message); }

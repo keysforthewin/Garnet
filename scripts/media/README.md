@@ -4,19 +4,13 @@ The three finished square MP4s, four product screenshots, poster frames, and X c
 
 ## Reproduce
 
-Requires the existing production build, the running Compose Mongo service, Node 22+, installed npm dependencies and Playwright Chromium, FFmpeg/FFprobe with libx264, and the Ubuntu Sans/Ubuntu Mono system fonts. Genuine agent captures also require authenticated `claude` and `codex` host CLIs. The scripts do not change the application build or production data.
+Requires the existing production build, the host MongoDB service on port 27018, Node 22+, installed npm dependencies and Playwright Chromium, FFmpeg/FFprobe with libx264, and the Ubuntu Sans/Ubuntu Mono system fonts. Genuine agent captures also require authenticated `claude` and `codex` host CLIs. The scripts do not change the application build or production data.
 
 ```sh
 node scripts/media/setup.mjs
 ```
 
-Start the isolated agent runner in another terminal:
-
-```sh
-node build/runner.mjs --runtime data/promo-runtime
-```
-
-Then capture, render, and verify:
+Leave the integrated demo server running and use another terminal to capture, render, and verify:
 
 ```sh
 node scripts/media/capture.mjs
@@ -24,7 +18,7 @@ node scripts/media/render.mjs
 node scripts/media/verify.mjs
 ```
 
-The demo app is fixed to `127.0.0.1:8082`, database `ed_promo`, and `data/promo-*` mounts. It creates Alex and Sam accounts and six fictional documents. Generated passwords stay in the ignored runtime directory. Capture reuses existing demo documents, so subsequent takes retain previous edits. To create a pristine take, use a fresh disposable demo database and matching empty demo directories; never reset `ed` or the production mounts.
+The demo app is fixed to `127.0.0.1:8082`, database `ed_promo`, and `data/promo-*` directories. It creates Alex and Sam accounts and six fictional documents. Generated passwords stay in the ignored runtime directory. Capture reuses existing demo documents, so subsequent takes retain previous edits. To create a pristine take, use a fresh disposable demo database and matching empty demo directories; never reset `ed` or the production directories.
 
 `storyboards.mjs` defines exact shot durations, source crops, overlay text, and X captions. `render.mjs` uses browser-rendered typography and FFmpeg to produce 1080×1080 H.264 MP4s at 30 fps, with fast-start metadata and no audio. Each exported cut is exactly 30 seconds. `COPY.md` is generated from the same storyboards.
 
@@ -40,10 +34,4 @@ For replacement videos, sign in to the repository's README editor, attach the fi
 
 ## Stop the demo services
 
-Stop the foreground promo runner with Ctrl+C, then:
-
-```sh
-docker compose -f compose.yaml -f data/promo-compose.yaml stop promo-app
-```
-
-The production app, HTTPS service, and Mongo service remain running. All completed media can be used independently of the capture environment.
+Stop the foreground demo server with Ctrl+C. The production app, HTTPS service, and MongoDB remain running.

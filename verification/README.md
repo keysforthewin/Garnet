@@ -1,17 +1,21 @@
 # Verification
 
-Garnet rename and deployment: verified default port 7777, public HTTPS at `garnet.outdoordevs.com`, branded login/sidebar/empty state and manifest, and the collaboration WebSocket upgrade through Cloudflare. The previous cabinet DNS record and ingress rule were replaced. Existing database and browser-storage identifiers were preserved for compatibility.
-
 Verified on 2026-09-22 on the development Linux host.
 
-- Dockerized build: passed, including TypeScript checking and six core tests.
-- Five Playwright scenarios passed against a separate Mongo database: forced password change; three-client collaboration with cursor restoration and offline reload/merge; account restrictions/export/trash/settings; server outage and mirror-write recovery with conflict/idempotency checks; injected local-storage quota failure with in-memory export.
-- Real Claude and Codex CLI smoke tests passed: create/read a document, resume the same session, and apply a document edit. Cancellation also passed.
-- A browser-triggered Claude job read the active document through MCP and returned `PANEL VERIFIED` in the AI side panel.
-- Multi-file Markdown import passed, with both contents verified in Mongo through the document API.
-- Local HTTPS served the app successfully, and the certificate download service returned a valid PEM certificate. Device trust remains a setup step.
-- The production library was left empty, with the seeded admin account still requiring its first password change.
+The live deployment runs directly on the host. `garnet.service` contains the HTTP server and agent executor in one Node process. `garnet-mongo.service` runs MongoDB 8 on loopback port 27018; `garnet-https.service` supplies direct LAN HTTPS on port 8443. Garnet's old containers, networks, and standalone runner service have been removed. Other applications' services are unchanged.
 
-`benchmark.json` contains the 500-document timing samples. `ai-panel.png` shows the tested AI panel. Browser traces and additional screenshots are generated under the ignored `test-results/` directory.
+- TypeScript checking, the host production build, and 16 core/agent/history/model tests passed.
+- All eight Playwright scenarios passed using an automatically managed host test server and separate `ed_test` database: bootstrap password change, three-client collaboration and offline reload/merge, access restrictions/export/trash/settings, server outage and mirror recovery, and injected local-storage quota failure.
+- Real Claude and Codex checks passed through the integrated server: document creation/read/edit, session continuation, and cancellation against the isolated test library.
+- Integrated executor unit tests cover ordered streaming/session events, failed CLI startup, temporary config cleanup, cancellation, shutdown, and timeout.
+- Added coverage verifies sidebar pinning, content-only history, unchanged revision counts/timestamps/mirror files after idle and no-op saves, colored previews/restoration, and separate model settings with executable discovery failures.
+- Live discovery returned model catalogs from both installed CLIs without submitting a prompt.
+- Select spacing was checked in Settings and all three AI dropdowns on desktop and mobile. Screenshots are in the ignored `test-results/host-select-*.png` files.
+- Both `https://garnet.outdoordevs.com/api/health` and direct `https://localhost:8443/api/health` passed; direct HTTPS was verified against the preserved CA.
+- Restored production collection counts matched the pre-migration backup. The original CA certificate is byte-for-byte unchanged.
 
-Scope of measurements: Chromium 153 on this host, with approximately 19 KB of Markdown per benchmark document. The quota scenario injects an IndexedDB quota error; it does not claim to reproduce every browser's storage eviction policy. Offline merging is tested in browsers; full-host CLI actions cannot be rolled back by restoring document revisions.
+The private migration archive, original Compose configuration, original runner unit, and production collection counts are in `data/deployment-backups/host-migration/`. Original database and certificate directories are retained for rollback; the active services use `data/mongo-host/` and `data/caddy-host/`.
+
+Use `./garnet status`, `./garnet logs`, `./garnet stop`, `./garnet start`, and `./garnet update` for operations. See the main README for host prerequisites, backups, browser tests, and real-agent smoke checks. Close existing app tabs and reopen them to activate the updated service worker.
+
+Historical performance measurements remain in `benchmark.json`: Chromium 153 on this host with 500 documents of approximately 19 KB each. These measurements predate the host migration and are not a new benchmark. The quota test injects a storage error; it does not reproduce every browser's eviction behavior.

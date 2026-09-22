@@ -1,5 +1,5 @@
 import { chromium } from '@playwright/test';
-import { execFileSync } from 'node:child_process';
+import { MongoClient } from 'mongodb';
 import { mkdir, writeFile } from 'node:fs/promises';
 import * as Y from 'yjs';
 import { updateYFragment, initProseMirrorDoc } from '@tiptap/y-tiptap';
@@ -9,11 +9,16 @@ const doc = new Y.Doc(); const fragment = doc.getXmlFragment('default');
 updateYFragment(doc, fragment, schema.nodeFromJSON(parseMarkdown(text)), { mapping: initProseMirrorDoc(fragment, schema).mapping, isOMark: new Map() });
 const state = Buffer.from(Y.encodeStateAsUpdate(doc)).toString('base64');
 const docs = Array.from({ length: 500 }, (_, i) => ({ _id: `benchmark-${String(i).padStart(4, '0')}`, title: `Benchmark note ${String(i).padStart(4, '0')}`, state, markdown: text, revision: 0, mirrorRevision: -1, createdAt: Date.now() - i * 1000, updatedAt: Date.now() - i * 1000, deletedAt: null, ops: [] }));
-execFileSync('docker', ['compose', 'exec', '-T', 'test-app', 'node', '--input-type=module', '-e', 'import {MongoClient} from "mongodb"; let raw=""; for await(const chunk of process.stdin) raw+=chunk; const client=await new MongoClient("mongodb://mongo:27017/ed_test").connect(); const docs=client.db().collection("documents"); await docs.deleteMany({_id:/^benchmark-/}); await docs.insertMany(JSON.parse(raw).map(d=>({...d,state:Buffer.from(d.state,"base64")}))); await client.close();'], { input: JSON.stringify(docs), maxBuffer: 1024 * 1024 });
+const mongo = await new MongoClient('mongodb://127.0.0.1:27018/ed_test').connect();
+try { const collection = mongo.db().collection('documents'); await collection.deleteMany({ _id: /^benchmark-/ } as any); await collection.insertMany(docs.map(d => ({ ...d, state: Buffer.from(d.state, 'base64') })) as any); } finally { await mongo.close(); }
 const browser = await chromium.launch(); const page = await browser.newPage();
 await page.addInitScript('window.__name = (fn) => fn');
 await page.goto('http://127.0.0.1:8081'); await page.getByLabel('Username', { exact: true }).fill('admin'); await page.getByLabel('Password', { exact: true }).fill('ed-test-password-2026'); await page.getByRole('button', { name: 'Sign in', exact: true }).click();
-await page.waitForFunction(() => { const text = document.querySelector('#cache-status')?.textContent || ''; const match = text.match(/(\d+)\/(\d+)/); return match && Number(match[1]) >= 500 && match[1] === match[2]; }, undefined, { timeout: 120000 });
+await page.waitForFunction(async () => {
+  const user = JSON.parse(localStorage.getItem('ed-user') || '{}');
+  const db = await new Promise<IDBDatabase>((resolve, reject) => { const request = indexedDB.open(`ed:${user.id}`); request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error); });
+  try { return await new Promise<boolean>(resolve => { const request = db.transaction('docs').objectStore('docs').getAll(); request.onsuccess = () => resolve(request.result.filter(d => d.id.startsWith('benchmark-') && d.state !== undefined).length === 500); }); } finally { db.close(); }
+}, undefined, { timeout: 120000 });
 await page.locator('[data-id="benchmark-0000"]').waitFor();
 const timings = { cachedOpenMs: [] as number[], typingMs: [] as number[], searchMs: [] as number[] };
 for (let i = 0; i < 25; i++) {

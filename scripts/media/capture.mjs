@@ -42,7 +42,7 @@ const settings = await admin.api('/settings');
 settings.agent.cwd = path.resolve('data/promo-workspace');
 settings.agent.timeoutMinutes = 4;
 await admin.api('/settings', 'PUT', settings);
-if (!(await admin.api('/runner')).ok) throw new Error('Start a host runner with --runtime data/promo-runtime.');
+if (!(await admin.api('/runner')).ok) throw new Error('The demo server agent executor is unavailable.');
 
 const notes = [
   ['Launch day', 'A tiny app. A little more room to think.\n\n## The plan\n\n- Share a 30-second demo\n- Invite a friend to write together\n- Put the source on GitHub\n\n## The promise\n\nFast notes. Shared ideas. Your agents, right here.'],
@@ -64,7 +64,7 @@ async function login(username) {
   const page = await context.newPage();
   page.on('pageerror', e => errors.push(e.message));
   await page.goto(base);
-  await expect(page.locator('#new-doc')).toBeVisible();
+  await expect(page.locator('#menu-button')).toBeVisible();
   return page;
 }
 const alex = await login('Alex');
@@ -81,7 +81,7 @@ const sam = await login('Sam');
 const pause = ms => new Promise(r => setTimeout(r, ms));
 async function open(page, title) {
   if (await page.locator('#ai-panel').isVisible()) await page.locator('#close-ai').click();
-  if (!(await page.locator('#search').isVisible())) await page.locator('#expand').click();
+  if (!(await page.locator('#search').isVisible())) { await page.locator('#menu-button').click(); await page.locator('#toggle-sidebar').click(); }
   await page.locator('#search').fill('');
   await page.locator('.doc-row').filter({ hasText: title }).first().click();
   await expect(page.getByLabel('Document title')).toHaveValue(title);
@@ -138,13 +138,13 @@ async function record(name, seconds, action = async () => {}, page = alex) {
 
 try {
   await open(alex, 'Launch day');
-  await expect(alex.locator('#save-status')).toHaveText('Saved to server');
+  await expect(alex.locator('#main')).toHaveAttribute('data-save-state', 'saved');
   await screenshot('editor');
   await record('home', 4, async () => { await alex.mouse.move(800, 400); });
   await record('typing', 6, async () => {
     await open(alex, 'Weekend ideas');
     await append(alex, '\nMake room for the next idea.');
-    await expect(alex.locator('#save-status')).toHaveText('Saved to server');
+    await expect(alex.locator('#main')).toHaveAttribute('data-save-state', 'saved');
   });
   await record('search', 6, async () => {
     await alex.locator('#search').click();
@@ -158,12 +158,12 @@ try {
   await record('offline', 6, async () => {
     await alex.context().setOffline(true);
     await append(alex, '\nStill writing. Even offline.');
-    await expect(alex.locator('#save-status')).toContainText('Saved locally');
+    await expect(alex.locator('#main')).toHaveAttribute('data-save-state', /offline|syncing/);
   });
   await alex.reload();
   await expect(alex.getByRole('textbox', { name: 'Document content' })).toContainText('Still writing. Even offline.');
   await alex.context().setOffline(false);
-  await expect(alex.locator('#save-status')).toHaveText('Saved to server');
+  await expect(alex.locator('#main')).toHaveAttribute('data-save-state', 'saved');
   console.log('Verified offline reload and reconnect');
 
   await open(alex, 'Launch checklist');
