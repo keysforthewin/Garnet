@@ -1,0 +1,78 @@
+name: ed
+services:
+  build:
+    image: node:22-bookworm-slim
+    profiles: [build]
+    volumes:
+      - .:/source:ro
+      - ./build:/output
+    command: [sh, /source/scripts/container-build.sh]
+  mongo:
+    image: mongo:8.0
+    restart: unless-stopped
+    volumes:
+      - ./data/mongo:/data/db
+    healthcheck:
+      test: [CMD, mongosh, --quiet, --eval, "db.adminCommand('ping').ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks: [backend]
+  app:
+    image: node:22-bookworm-slim
+    user: "1000:1000"
+    restart: unless-stopped
+    working_dir: /app
+    command: [node, server.mjs]
+    read_only: true
+    tmpfs: [/tmp]
+    volumes:
+      - ./build:/app:ro
+      - ./data/documents:/documents
+      - ./data/runtime:/runtime
+      - ./data/caddy:/caddy-data:ro
+    ports:
+      - "127.0.0.1:7777:7777"
+    depends_on:
+      mongo:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://localhost:7777/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks: [backend, web]
+  https:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    command: [caddy, run, --config, /runtime/Caddyfile, --adapter, caddyfile, --watch]
+    ports:
+      - "8443:443"
+    volumes:
+      - ./data/runtime:/runtime:ro
+      - ./data/caddy:/data
+      - ./data/caddy-config:/config
+    depends_on:
+      app:
+        condition: service_healthy
+    networks: [web]
+  test-app:
+    image: node:22-bookworm-slim
+    profiles: [test]
+    user: "1000:1000"
+    working_dir: /app
+    command: [node, server.mjs, --mongo, "mongodb://mongo:27017/ed_test"]
+    volumes:
+      - ./build:/app:ro
+      - ./data/test-documents:/documents
+      - ./data/test-runtime:/runtime
+    ports:
+      - "127.0.0.1:8081:7777"
+    depends_on:
+      mongo:
+        condition: service_healthy
+    networks: [backend, web]
+networks:
+  backend:
+    internal: true
+  web:

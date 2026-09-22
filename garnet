@@ -1,0 +1,14 @@
+#!/bin/sh
+set -eu
+cd "$(dirname "$0")"
+case "${1:-help}" in
+  build) mkdir -p build; docker compose --profile build run --rm build ;;
+  start) mkdir -p data/documents data/runtime data/caddy data/caddy-config; test -f build/server.mjs || { echo 'Run ./garnet build first.'; exit 1; }; docker compose up -d mongo app https ;;
+  stop) docker compose down ;;
+  update) "$0" build; docker compose up -d --force-recreate app https ;;
+  runner) exec node build/runner.mjs --runtime "$(pwd)/data/runtime" ;;
+  install-runner) exec sh scripts/install-runner.sh ;;
+  logs) docker compose logs -f --tail=80 ;;
+  test) npm run check; npm test; npm run test:e2e ;;
+  *) echo 'Usage: ./garnet {build|start|stop|update|runner|install-runner|logs|test}' ;;
+esac

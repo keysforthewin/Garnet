@@ -1,0 +1,3 @@
+#!/bin/sh
+# Compatibility alias for the original launcher.
+exec "$(dirname "$0")/garnet" "$@"

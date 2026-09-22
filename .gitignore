@@ -1,0 +1,10 @@
+node_modules/
+build/
+data/
+test-results/
+playwright-report/
+*.log
+.env
+.env.*
+*.pem
+*.key
