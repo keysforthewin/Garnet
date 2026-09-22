@@ -1,8 +1,58 @@
 # Garnet
 
-A small shared notes app: Tiptap editing, live cursors, offline documents, Mongo persistence, Markdown files on the host, and Claude/Codex CLI conversations.
+A lightweight shared notes app built to load fast and keep up with your ideas. Write together with live cursors, save locally as you type, and bring your Claude or Codex agents directly into your documents.
 
-Licensed under the [MIT License](LICENSE).
+**Free. Open source. [MIT licensed](LICENSE).**
+
+![Garnet's editor with a populated notes library and a launch-day document](docs/media/garnet/editor.png)
+
+## Garnet in 30 seconds
+
+Three square, silent demos with text overlays. Play them inline below, or use the previews to open the repository MP4s.
+
+| Your brain hates loading screens | One doc. Multiple brains. | Your notes brought backup |
+| --- | --- | --- |
+| [![Watch the speed demo](docs/media/garnet/01-speed-poster.png)](docs/media/garnet/01-speed.mp4?raw=true) | [![Watch the collaboration demo](docs/media/garnet/02-together-poster.png)](docs/media/garnet/02-together.mp4?raw=true) | [![Watch the agent demo](docs/media/garnet/03-agents-poster.png)](docs/media/garnet/03-agents.mp4?raw=true) |
+| [Watch / download MP4](docs/media/garnet/01-speed.mp4?raw=true) | [Watch / download MP4](docs/media/garnet/02-together.mp4?raw=true) | [Watch / download MP4](docs/media/garnet/03-agents.mp4?raw=true) |
+
+**Your brain hates loading screens** — lightweight editing, worker-powered search, and local autosave.
+
+https://github.com/user-attachments/assets/da659fc9-6f9f-4750-a340-9c04ac6b361f
+
+**One doc. Multiple brains.** — shared cursors, live edits, and incremental sync.
+
+https://github.com/user-attachments/assets/6f310003-e1c1-481a-ac6a-430c5737631f
+
+**Your notes brought backup** — your Claude or Codex, right inside your documents.
+
+https://github.com/user-attachments/assets/dee33333-938b-4121-ab75-80b5cf6440a5
+
+[Overlay scripts and ready-to-post X copy](docs/media/garnet/COPY.md) · [Local video player](docs/media/garnet/index.html) (open in a browser after cloning).
+
+- **Keep the editor moving.** A Web Worker handles library search off the UI thread. Editing and cached navigation happen locally.
+- **Save as you write.** Local autosave keeps your changes on the device; background sync and server persistence have distinct status indicators.
+- **Write together.** Live cursors and incremental Yjs updates keep collaboration responsive. Background library caching supports offline work.
+- **Bring your agents.** Claude and Codex can read and edit documents through Garnet's tools, using your existing host CLI accounts. Agent service usage is separate from the free app.
+- **Pick up offline.** A service worker caches the app shell, and IndexedDB stores your documents. Reconnect to merge changes.
+
+<details>
+<summary>See collaboration and agents in action</summary>
+
+**Live collaboration:** Alex and Sam editing the same launch checklist.
+
+![Two people editing a Garnet document with a named live cursor](docs/media/garnet/collaboration.png)
+
+**Claude:** rough notes become a launch checklist in the active document.
+
+![Claude's completed conversation beside the checklist it created](docs/media/garnet/claude.png)
+
+**Codex:** the checklist gets an owner for each next step.
+
+![Codex's completed conversation beside the document with assigned owners](docs/media/garnet/codex.png)
+
+These captures use fictional demo notes and real agent runs. Agent waiting is shortened and labeled in the videos. [Capture and rendering instructions](scripts/media/README.md).
+
+</details>
 
 Public address: **https://garnet.outdoordevs.com**, routed through the existing Cloudflare tunnel to **http://localhost:7777**. Cloudflare supplies the public HTTPS certificate; the local CA instructions below apply only to direct LAN access.
 

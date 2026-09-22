@@ -1,0 +1,58 @@
+{
+  "verified": "2026-09-22T18:17:29.541Z",
+  "files": [
+    {
+      "file": "01-speed.mp4",
+      "seconds": 30,
+      "bytes": 436246,
+      "width": 1080,
+      "height": 1080,
+      "fps": 30,
+      "codec": "h264",
+      "decoded": true
+    },
+    {
+      "file": "02-together.mp4",
+      "seconds": 30,
+      "bytes": 422897,
+      "width": 1080,
+      "height": 1080,
+      "fps": 30,
+      "codec": "h264",
+      "decoded": true
+    },
+    {
+      "file": "03-agents.mp4",
+      "seconds": 30,
+      "bytes": 513784,
+      "width": 1080,
+      "height": 1080,
+      "fps": 30,
+      "codec": "h264",
+      "decoded": true
+    }
+  ],
+  "browserPlayback": true,
+  "seekToEndCard": true,
+  "mobilePlayerOverflow": false,
+  "readmeMediaPaths": true,
+  "capture": {
+    "recorded": "2026-09-22T18:10:46.930Z",
+    "offlineReload": true,
+    "reconnection": true,
+    "bidirectionalCollaboration": true,
+    "browserErrors": 0,
+    "agents": [
+      {
+        "provider": "claude",
+        "status": "completed",
+        "elapsedSeconds": 28
+      },
+      {
+        "provider": "codex",
+        "status": "completed",
+        "elapsedSeconds": 30
+      }
+    ]
+  }
+}

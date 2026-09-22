@@ -1,0 +1,25 @@
+{
+  "verified": "2026-09-22T20:44:49.420Z",
+  "videos": [
+    {
+      "file": "01-speed.mp4",
+      "sha256": "ebc99943c546a9cff404daa97acbdc33e115ecb1908ea0fdf1ec3c5b4080bca8",
+      "url": "https://github.com/user-attachments/assets/da659fc9-6f9f-4750-a340-9c04ac6b361f",
+      "bytes": 436246
+    },
+    {
+      "file": "02-together.mp4",
+      "sha256": "7150a0a37288febeb111523b10163e319867234d82d813f7b6a6dc9987be5aa5",
+      "url": "https://github.com/user-attachments/assets/6f310003-e1c1-481a-ac6a-430c5737631f",
+      "bytes": 422897
+    },
+    {
+      "file": "03-agents.mp4",
+      "sha256": "3419eba707f8525c274e607a6ea39b3be7aa4ec111a6a8dfbbf96e4c89e47f66",
+      "url": "https://github.com/user-attachments/assets/dee33333-938b-4121-ab75-80b5cf6440a5",
+      "bytes": 513784
+    }
+  ],
+  "githubPreviewPlayback": true,
+  "githubPreviewSeek": true
+}
