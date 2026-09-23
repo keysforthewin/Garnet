@@ -46,6 +46,14 @@ test('installer creates user services, a private config, and a working managed l
   assert.equal(spawnSync('sh', ['-n', launcher]).status, 0);
   assert.ok((await commands(base)).some(parts => parts.includes('enable-linger')));
 });
+test('the garnet command runs through the current release symlink', async t => {
+  const base = await mkdtemp(path.join(os.tmpdir(), 'garnet-launcher-test-'));
+  t.after(() => rm(base, { recursive: true, force: true }));
+  await symlink(path.resolve('.'), path.join(base, 'current'));
+  const result = spawnSync(process.execPath, [path.join(base, 'current/scripts/manage.mjs'), 'help'], { encoding: 'utf8', timeout: 15000 });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /Usage: garnet/);
+});
 test('installer preserves native source data and restores the source service if activation fails', async t => {
   const base = await fixture(t);
   const legacy = path.join(base, 'source');

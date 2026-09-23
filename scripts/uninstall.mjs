@@ -36,7 +36,8 @@ export async function uninstall(base) {
   for (const name of names) {
     const file = path.join(units, name);
     if (!existsSync(file)) continue;
-    run('systemctl', ['--user', 'disable', '--now', name]);
+    // The update service only runs from its timer, so it has nothing to disable.
+    run('systemctl', name === 'garnet-update.service' ? ['--user', 'stop', name] : ['--user', 'disable', '--now', name]);
     await rm(file);
   }
   run('systemctl', ['--user', 'daemon-reload']);

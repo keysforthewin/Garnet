@@ -1,6 +1,6 @@
 import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdir, readFile, writeFile, rename, rm, readdir, readlink, chmod, mkdtemp } from 'node:fs/promises';
-import { existsSync, accessSync, constants } from 'node:fs';
+import { existsSync, accessSync, constants, realpathSync } from 'node:fs';
 import { availablePort, appPort, validPort } from './ports.mjs';
 import { retireHttps } from './retire-https.mjs';
 import os from 'node:os';
@@ -324,6 +324,7 @@ async function main() {
   }
   console.log('Usage: garnet {start|stop|url|port NUMBER|status|logs|update|uninstall [--yes]|autoupdate on|off|status}');
 }
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+// The garnet command runs this file through the `current` symlink, and Node reports the release's real path.
+if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
   main().catch(error => { console.error(error.message); process.exitCode = 1; });
 }
