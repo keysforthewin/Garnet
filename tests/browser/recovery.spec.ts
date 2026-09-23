@@ -38,3 +38,36 @@ test('injected storage quota failure keeps the editor usable and permits in-memo
   await expect(page.locator('#main')).toHaveAttribute('data-save-state', 'local-error'); await expect(page.locator('.prose')).toContainText('in-memory addition');
   const downloaded = page.waitForEvent('download'); await page.locator('#menu-button').click(); await page.locator('#export-button').click(); const file = await downloaded; expect(await readFile((await file.path())!, 'utf8')).toContain('Preserve this in-memory addition.');
 });
+test('a version 1 local cache is upgraded in place and still opens offline', async ({ page }) => {
+  await page.goto('/'); await page.getByLabel('Username', { exact: true }).fill('admin'); await page.getByLabel('Password', { exact: true }).fill('ed-test-password-2026'); await page.getByRole('button', { name: 'Sign in', exact: true }).click();
+  await page.locator('#menu-button').click(); await page.locator('#new-doc').click(); await page.getByLabel('Document title').fill('Upgrade check'); await page.locator('.prose').click(); await page.keyboard.type('Content from the old cache.');
+  await expect(page.locator('#main')).toHaveAttribute('data-save-state', 'saved'); await expect.poll(() => page.evaluate(() => !!navigator.serviceWorker.controller)).toBe(true);
+  const id = new URL(page.url()).hash.slice(1);
+  // Leave the app so it releases its databases, then rewrite the cache in the version 1 layout (content inside each
+  // 'docs' record) and drop the document's y-indexeddb copy, so its text can only come from the migrated snapshot.
+  await page.goto('/api/health');
+  await page.evaluate(async id => {
+    const user = JSON.parse(localStorage.getItem('ed-user')!); const name = `ed:${user.id}`;
+    const done = (request: IDBRequest | IDBTransaction) => new Promise<any>((resolve, reject) => { if (request instanceof IDBTransaction) { request.oncomplete = () => resolve(undefined); request.onerror = () => reject(request.error); } else { request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error); } });
+    const open = (version?: number) => { const request = version ? indexedDB.open(name, version) : indexedDB.open(name); request.onupgradeneeded = () => { for (const store of ['docs', 'ops', 'prefs']) request.result.createObjectStore(store); }; return done(request) as Promise<IDBDatabase>; };
+    const entries = async (db: IDBDatabase, store: string) => { const tx = db.transaction(store); const [keys, values] = await Promise.all([done(tx.objectStore(store).getAllKeys()), done(tx.objectStore(store).getAll())]); return keys.map((key: string, i: number) => [key, values[i]]); };
+    const current = await open(); const content = new Map((await entries(current, 'content')).map(([key, value]: any) => [key, value]));
+    const stores = Object.fromEntries(await Promise.all(['docs', 'ops', 'prefs'].map(async store => [store, await entries(current, store)])));
+    current.close(); await done(indexedDB.deleteDatabase(name)); await done(indexedDB.deleteDatabase(`${name}:doc:${id}`));
+    const old = await open(1); const tx = old.transaction(['docs', 'ops', 'prefs'], 'readwrite');
+    for (const [key, value] of stores.docs) { const { cached, ...meta } = value; const saved: any = content.get(key); tx.objectStore('docs').put(cached ? { ...meta, state: saved.state, markdown: saved.markdown } : meta, key); }
+    for (const store of ['ops', 'prefs']) for (const [key, value] of stores[store]) tx.objectStore(store).put(value, key);
+    await done(tx); old.close();
+  }, id);
+  await page.context().setOffline(true); await page.goto(`/#${id}`);
+  await expect(page.getByRole('textbox', { name: 'Document content' })).toContainText('Content from the old cache.');
+  const layout = await page.evaluate(async id => {
+    const user = JSON.parse(localStorage.getItem('ed-user')!); const request = indexedDB.open(`ed:${user.id}`);
+    const db = await new Promise<IDBDatabase>(resolve => { request.onsuccess = () => resolve(request.result); });
+    const get = (store: string) => new Promise<any>(resolve => { const r = db.transaction(store).objectStore(store).get(id); r.onsuccess = () => resolve(r.result); });
+    const [meta, content] = await Promise.all([get('docs'), get('content')]); db.close();
+    return { version: db.version, metaHasState: 'state' in meta, cached: meta.cached, contentHasState: typeof content?.state === 'string' };
+  }, id);
+  expect(layout).toEqual({ version: 2, metaHasState: false, cached: true, contentHasState: true });
+  await page.context().setOffline(false);
+});

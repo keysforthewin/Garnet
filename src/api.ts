@@ -5,7 +5,9 @@ export async function api<T = any>(url: string, method = 'GET', body?: any): Pro
   if (!response.ok) { const error = await response.json().catch(() => ({ error: response.statusText })); throw Object.assign(new Error(error.error), { status: response.status }); }
   return response.json();
 }
-export function escape(value: unknown) { const div = document.createElement('div'); div.textContent = String(value ?? ''); return div.innerHTML; }
+// Safe in text and quoted attribute values, without creating a DOM node per call.
+const entities: Record<string, string> = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+export function escape(value: unknown) { return String(value ?? '').replace(/[&<>"']/g, ch => entities[ch]); }
 export function toast(message: string) {
   let region = document.querySelector<HTMLElement>('#toast');
   if (!region) { region = document.createElement('div'); region.id = 'toast'; region.setAttribute('role', 'status'); document.body.append(region); }

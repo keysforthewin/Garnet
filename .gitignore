@@ -8,3 +8,4 @@ playwright-report/
 .env.*
 *.pem
 *.key
+perf-results/

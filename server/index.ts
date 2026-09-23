@@ -8,12 +8,13 @@ import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
 import { Hocuspocus } from '@hocuspocus/server';
 import { MongoClient } from 'mongodb';
-import { mkdir, writeFile, rename, unlink, chmod, readFile } from 'node:fs/promises';
+import { mkdir, writeFile, rename, unlink, chmod, readFile, readdir } from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import * as Y from 'yjs';
 import { yDocToProsemirrorJSON, updateYFragment, initProseMirrorDoc } from '@tiptap/y-tiptap';
-import { schema, parseMarkdown, serializeMarkdown, filename } from '../shared/editor.js';
+import { filename } from '../shared/editor.js';
+import { schema, parseMarkdown, serializeMarkdown } from '../shared/markdown.js';
 import { defaults, normalizeAgentSettings, type Settings } from '../shared/types.js';
 import { persistenceSignature } from '../shared/sync.js';
 import { savedRevisions, type Revision } from '../shared/history.js';
@@ -404,6 +405,19 @@ internal.use(errorHandler);
 await unlink(path.join(runtime, 'app.sock')).catch(() => {});
 const internalServer = internal.listen(path.join(runtime, 'app.sock'), () => void chmod(path.join(runtime, 'app.sock'), 0o600));
 app.use('/api', (_req, res) => res.status(404).json({ error: 'Not found' }));
+// The build writes Brotli and gzip copies of every asset; send one rather than compressing on each request.
+const precompressed = new Set(await readdir(path.join(publicDir, 'assets')).catch(() => []));
+const assetTypes: Record<string, string> = { '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8' };
+app.use('/assets', (req, res, next) => {
+  const name = req.path.slice(1); const type = assetTypes[path.extname(name)];
+  if (!type || (req.method !== 'GET' && req.method !== 'HEAD')) return next();
+  // Browsers list gzip before br, so ask for each explicitly to prefer the smaller one.
+  const encoding = req.acceptsEncodings('br') ? 'br' : req.acceptsEncodings('gzip') ? 'gzip' : undefined;
+  const file = encoding && `${name}.${encoding === 'br' ? 'br' : 'gz'}`;
+  if (!file || !precompressed.has(file)) return next();
+  res.vary('Accept-Encoding'); res.set({ 'Content-Type': type, 'Content-Encoding': encoding });
+  res.sendFile(path.join(publicDir, 'assets', file), { immutable: true, maxAge: '1y', acceptRanges: false }, error => { if (error) next(error); });
+});
 app.use('/assets', express.static(path.join(publicDir, 'assets'), { immutable: true, maxAge: '1y' }));
 app.use(express.static(publicDir, { maxAge: 0 }));
 app.get('/{*path}', (_req, res) => res.sendFile(path.join(publicDir, 'index.html')));

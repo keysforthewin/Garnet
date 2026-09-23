@@ -25,7 +25,7 @@ Three square, silent demos with text overlays. Use the previews to open the vide
 | [![Watch the speed demo](docs/media/garnet/01-speed-poster.png)](docs/media/garnet/01-speed.mp4?raw=true) | [![Watch the collaboration demo](docs/media/garnet/02-together-poster.png)](docs/media/garnet/02-together.mp4?raw=true) | [![Watch the agent demo](docs/media/garnet/03-agents-poster.png)](docs/media/garnet/03-agents.mp4?raw=true) |
 | [Watch / download MP4](docs/media/garnet/01-speed.mp4?raw=true) | [Watch / download MP4](docs/media/garnet/02-together.mp4?raw=true) | [Watch / download MP4](docs/media/garnet/03-agents.mp4?raw=true) |
 
-- **Keep the editor moving.** A Web Worker handles library search off the UI thread. Editing and cached navigation happen locally.
+- **Keep the editor moving.** A Web Worker handles library search and saves the local copy of each document, off the UI thread. Editing and cached navigation happen locally.
 - **Save as you write.** Local autosave keeps your changes on the device; sync to the server happens in the background.
 - **Write together.** Live cursors and incremental Yjs updates keep collaboration responsive. Background library caching supports offline work.
 - **Bring your agents.** Claude and Codex can read and edit documents through Garnet's tools, using your existing host CLI accounts. Agent service usage is separate from the free app.

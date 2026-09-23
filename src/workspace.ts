@@ -1,32 +1,62 @@
 import { Editor } from '@tiptap/core';
 import Collaboration from '@tiptap/extension-collaboration';
 import CollaborationCaret from '@tiptap/extension-collaboration-caret';
-import { HocuspocusProvider } from '@hocuspocus/provider';
 import * as Y from 'yjs';
+import { Awareness } from 'y-protocols/awareness';
 import { IndexeddbPersistence } from 'y-indexeddb';
-import { absolutePositionToRelativePosition, relativePositionToAbsolutePosition, ySyncPluginKey, yDocToProsemirrorJSON, updateYFragment, initProseMirrorDoc } from '@tiptap/y-tiptap';
-import { extensions, schema, parseMarkdown, serializeMarkdown, filename } from '../shared/editor';
+import { absolutePositionToRelativePosition, relativePositionToAbsolutePosition, ySyncPluginKey } from '@tiptap/y-tiptap';
+import { extensions, filename } from '../shared/editor';
 import type { User, DocMeta } from '../shared/types';
-import { persistenceSignature } from '../shared/sync';
+import { documentSignature } from '../shared/sync';
 import { diffLines, type SavedRevision } from '../shared/history';
 import { api, csrf, setCsrf, toast, escape, dialog, download } from './api';
+import { unb64 } from './base64';
 import * as cache from './db';
 
-interface CachedDoc extends DocMeta { state?: string; markdown?: string; dirty?: boolean; localOnly?: boolean }
-interface OpenDoc { doc: Y.Doc; persistence: IndexeddbPersistence; provider?: HocuspocusProvider; touched: number; timer?: ReturnType<typeof setTimeout>; localWrite?: Promise<void>; generation: number }
+// Metadata stays in memory; content (base64 Yjs state and Markdown) lives in the 'content' store.
+interface CachedDoc extends DocMeta { cached?: boolean; dirty?: boolean; localOnly?: boolean }
+interface Content { id: string; state: string; markdown?: string }
+// Carets use the document's own awareness, so an editor can show them before the provider connects.
+interface OpenDoc { doc: Y.Doc; persistence: IndexeddbPersistence; awareness: Awareness; provider?: import('@hocuspocus/provider').HocuspocusProvider; touched: number; timer?: ReturnType<typeof setTimeout>; generation: number; pendingSince?: number; ready?: Promise<void> }
 interface Operation { id: string; version: string; path: string; method: string; body: any; createdAt: number }
+type Session = { user: User; csrf: string };
 const records = new Map<string, CachedDoc>();
 const opened = new Map<string, OpenDoc>();
+// Recently viewed editors stay alive off the page, so returning to a document skips
+// rebuilding its schema, plugins and DOM. Least recently viewed first.
+interface LiveEditor { editor: Editor; awareness: Awareness; words?: string }
+const editors = new Map<string, LiveEditor>(); const keptEditors = 4;
 let user: User; let editor: Editor | undefined; let activeId = ''; let currentOpen = 0;
 let prefs: Record<string, any> = {}; let preferenceTimer: ReturnType<typeof setTimeout>; let changedPrefs: Record<string, any> = {};
 let syncRunning = false; let syncAgain = false; let online = navigator.onLine; let events: EventSource | undefined; let searchQuery = ''; let matches: Set<string> | null = null;
-let localError = false; let showingTrash = false;
-const worker = new Worker(new URL('./search.worker.ts', import.meta.url), { type: 'module' });
-const b64 = (bytes: Uint8Array) => { let text = ''; for (const byte of bytes) text += String.fromCharCode(byte); return btoa(text); };
-const unb64 = (text: string) => Uint8Array.from(atob(text), ch => ch.charCodeAt(0));
+let localError = false; let showingTrash = false; let startupSession: Promise<Session> | undefined;
+// Search, local snapshots and Markdown conversion run in this worker. Its code repeats Yjs,
+// Tiptap and the Markdown parser, so it starts once the first document is on screen.
+let worker: Worker | undefined; const unsent: unknown[] = [];
+const replies = new Map<number, { resolve: (value: any) => void; reject: (error: Error) => void }>(); let requests = 0;
+function post(message: unknown) { if (worker) worker.postMessage(message); else unsent.push(message); }
+function ask<T>(message: Record<string, unknown>) {
+  const request = ++requests; post({ ...message, request });
+  return new Promise<T>((resolve, reject) => replies.set(request, { resolve, reject }));
+}
+function startWorker() {
+  if (worker) return;
+  worker = new Worker(new URL('./library.worker.ts', import.meta.url), { type: 'module' });
+  worker.onmessage = ({ data }) => {
+    if (data.type === 'reply') { const reply = replies.get(data.request)!; replies.delete(data.request); if (data.error === undefined) reply.resolve(data.value); else reply.reject(new Error(data.error)); }
+    if (data.type === 'results' && data.query === searchQuery) { matches = searchQuery.trim() ? new Set(data.ids) : null; renderList(); }
+  };
+  worker.onerror = () => { for (const reply of replies.values()) reply.reject(new Error('The background worker stopped.')); replies.clear(); };
+  for (const message of unsent.splice(0)) worker.postMessage(message);
+}
+// Coalesces bursts of calls (keystrokes, scroll events) into one call after `ms` of quiet.
+function debounce(run: () => void, ms: number) { let timer: ReturnType<typeof setTimeout> | undefined; const call = () => { clearTimeout(timer); timer = setTimeout(run, ms); }; call.cancel = () => clearTimeout(timer); return call; }
 const $ = <T extends HTMLElement = HTMLElement>(selector: string) => document.querySelector<T>(selector)!;
 function localFailure(error: any) { localError = true; status('local-error'); toast(`Local storage: ${error.message}. Export your notes before closing this page.`); }
 async function persist(record: CachedDoc) { try { await cache.put('docs', record.id, { ...record }); } catch (error) { localFailure(error); throw error; } }
+async function store(id: string, content: Omit<Content, 'id'>) { try { await cache.put('content', id, { id, state: content.state, markdown: content.markdown }); } catch (error) { localFailure(error); throw error; } }
+const stored = (id: string) => cache.get<Content>('content', id);
+const index = (id: string, title: string, markdown?: string) => post({ type: 'index', docs: [{ id, title, markdown }] });
 function markPreference(key: string, value: any) {
   prefs[key] = value; changedPrefs[key] = value;
   cache.put('prefs', 'values', prefs).catch(localFailure);
@@ -35,16 +65,25 @@ function markPreference(key: string, value: any) {
     void enqueue('/preferences', 'PATCH', body);
   }, 750);
 }
-export async function start(account: User) {
-  user = account; await cache.openCache(user.id);
+// A returning user starts from the cached account; `session` is the page's check
+// of it, which the first sync uses instead of asking again.
+export async function start(account: User, session?: Promise<Session>) {
+  user = account; startupSession = session;
+  await cache.openCache(user.id, { blocked: () => toast('Close other Garnet tabs to finish updating this one.'), replaced: () => toast('Garnet was updated in another tab. Reload this page to keep editing.') });
   for (const record of await cache.all<CachedDoc>('docs')) records.set(record.id, record);
   prefs = await cache.get('prefs', 'values') || {};
   document.documentElement.dataset.theme = prefs.theme || 'system';
+  // Measure before building the workspace so reading the viewport doesn't force a layout of it.
+  const updateViewport = () => {
+    const viewport = window.visualViewport;
+    if (viewport && viewport.scale === 1) document.documentElement.style.setProperty('--visible-height', `${viewport.height}px`);
+  };
+  window.visualViewport?.addEventListener('resize', updateViewport);
+  updateViewport();
   $('#app').innerHTML = `<div class="workspace"><dialog id="navigation" aria-label="Navigation"><aside id="sidebar"><div class="sidebar-top"><label class="search-label"><span class="sr-only">Search documents</span><input id="search" type="search" placeholder="Search your notes…" autocomplete="off"></label><kbd>⌘ K</kbd><button id="collapse" class="icon-button" autofocus title="Close navigation (Esc)" aria-label="Close navigation">×</button></div><div class="list-heading"><span id="list-label">YOUR DOCUMENTS</span><span id="doc-count"></span></div><nav id="doc-list" aria-label="Documents"></nav><div id="document-menu" class="menu-dropdown"></div><div class="sidebar-bottom"><button id="trash-button">Trash</button><button id="account-button" title="Account">${escape(user.username)}</button></div><div id="sync-error" class="sync-error" hidden></div></aside></dialog><main id="main"><header class="document-header"><div class="document-menu"><button id="menu-button" class="icon-button" aria-label="Open menu" aria-expanded="false" aria-controls="navigation" aria-haspopup="dialog"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button></div><div class="header-actions"><button id="ai-button" class="ai-button">Ask AI <kbd>⌘ J</kbd></button></div></header><div id="empty"><div class="empty-mark">Garnet</div><h1>Room to think.</h1><p>A quick note, a rough idea, a shared draft.<br>Choose a document or start a fresh page.</p><button class="primary" id="empty-new">New document</button></div><section id="document" hidden><input id="document-title" aria-label="Document title" placeholder="Untitled" maxlength="200"><div id="toolbar" role="toolbar" aria-label="Formatting"><button data-command="bold" title="Bold (Ctrl+B)"><strong>B</strong></button><button data-command="italic" title="Italic (Ctrl+I)"><em>I</em></button><button data-command="strike" title="Strikethrough"><s>S</s></button><span class="toolbar-divider"></span><button data-command="heading" title="Heading">H2</button><button data-command="bulletList" title="Bullet list">List</button><button data-command="orderedList" title="Numbered list">1.</button><button data-command="taskList" title="Checklist">Tasks</button><button data-command="blockquote" title="Quote">Quote</button><button data-command="codeBlock" title="Code block">Code</button><button data-command="link" title="Insert link">Link</button><button data-command="table" title="Insert table">Table</button><span class="toolbar-divider"></span><button data-command="undo" title="Undo">↶</button><button data-command="redo" title="Redo">↷</button></div><div id="editor-mount"></div><footer class="document-footer"><span id="word-count"></span><span id="people"></span></footer></section></main><aside id="ai-panel" hidden></aside></div>`;
   $('#empty-new').onclick = () => void newDocument();
   $('#collapse').onclick = () => closeMenu();
-  $('#search').oninput = () => { searchQuery = ($<HTMLInputElement>('#search')).value; worker.postMessage({ type: 'search', query: searchQuery }); };
-  worker.onmessage = ({ data }) => { if (data.query === searchQuery) { matches = searchQuery.trim() ? new Set(data.ids) : null; renderList(); } };
+  $('#search').oninput = () => { searchQuery = ($<HTMLInputElement>('#search')).value; post({ type: 'search', query: searchQuery }); };
   $('#trash-button').onclick = () => { showingTrash = !showingTrash; $('#trash-button').classList.toggle('selected', showingTrash); renderList(); };
   $('#account-button').onclick = () => { closeMenu(); showAccount(); };
   const navigation = $<HTMLDialogElement>('#navigation');
@@ -73,21 +112,26 @@ export async function start(account: User) {
   $('#menu-button').addEventListener('keydown', e => {
     if (e.key === 'ArrowDown') { e.preventDefault(); documentOptions(); }
   });
-  const updateViewport = () => {
-    const viewport = window.visualViewport;
-    if (viewport && viewport.scale === 1) document.documentElement.style.setProperty('--visible-height', `${viewport.height}px`);
-  };
-  window.visualViewport?.addEventListener('resize', updateViewport);
-  updateViewport();
+  $('#doc-list').addEventListener('click', e => {
+    const target = e.target as Element; const pin = target.closest<HTMLButtonElement>('[data-pin]'); const row = target.closest<HTMLButtonElement>('[data-id]');
+    if (pin) {
+      const id = pin.dataset.pin!; const pins: string[] = prefs.pins || [];
+      markPreference('pins', pins.includes(id) ? pins.filter(p => p !== id) : [...pins, id]);
+      renderList(); $('#doc-list').querySelector<HTMLButtonElement>(`[data-pin="${id}"]`)?.focus();
+    } else if (row && showingTrash) {
+      const id = row.dataset.id!; const d = dialog('Restore document', `<p>${escape(records.get(id)!.title)}</p><button class="primary" id="restore-trash">Restore</button>`);
+      d.querySelector('#restore-trash')!.addEventListener('click', () => { void setDeleted(id, false); d.close(); });
+    } else if (row) void openDocument(row.dataset.id!);
+  });
   $('#ai-button').onclick = () => void toggleAI();
   $('#document-title').oninput = () => {
     const id = activeId; const record = records.get(id)!; record.title = $<HTMLInputElement>('#document-title').value || 'Untitled';
-    persist(record).catch(() => {}); renderList();
+    persist(record).catch(() => {}); renderList(); index(id, record.title);
     void enqueue(`/documents/${id}`, 'PATCH', { title: record.title, opId: crypto.randomUUID() });
   };
   $('#toolbar').addEventListener('mousedown', e => { if ((e.target as Element).closest('button')) e.preventDefault(); });
   $('#toolbar').addEventListener('click', e => { const button = (e.target as Element).closest<HTMLButtonElement>('button[data-command]'); if (button && editor) command(button.dataset.command!); });
-  $('#main').addEventListener('scroll', () => saveCursor(), { passive: true });
+  $('#main').addEventListener('scroll', saveCursorSoon, { passive: true });
   document.addEventListener('keydown', e => {
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); documentOptions(); $<HTMLInputElement>('#search').focus(); }
     if ((e.altKey && e.key.toLowerCase() === 'n') || ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'n')) { e.preventDefault(); void newDocument(); }
@@ -99,13 +143,22 @@ export async function start(account: User) {
   window.addEventListener('beforeunload', e => { if (localError) { e.preventDefault(); e.returnValue = ''; } });
   window.addEventListener('offline', () => { online = false; status(); });
   window.addEventListener('online', () => { void synchronize(); });
-  renderList(); worker.postMessage({ type: 'index', docs: [...records.values()] });
+  renderList(); post({ type: 'index', docs: [...records.values()].map(({ id, title }) => ({ id, title })) });
+  post({ type: 'load', database: `ed:${user.id}` });
   const hashId = location.hash.slice(1);
   const available = (id: string | undefined) => id && records.has(id) && !records.get(id)!.deletedAt && !records.get(id)!.purgedAt;
   window.addEventListener('hashchange', () => {
-    const linked = location.hash.slice(1);
-    const target = available(linked) ? linked : prefs.lastDocument;
-    if (available(target)) void openDocument(target, false);
+    const linked = location.hash.slice(1); const record = records.get(linked);
+    // A known document that has not downloaded needs the server. Offline, as far as this page knows, it waits for sync.
+    const waiting = record && !record.cached && !record.localOnly && !online;
+    if (!waiting) { const target = available(linked) ? linked : prefs.lastDocument; if (available(target)) void openDocument(target, false); }
+    // As at startup, a linked document this device does not have yet opens when
+    // sync brings it, unless another document was chosen in the meantime.
+    if (linked && (!record || waiting)) {
+      const since = currentOpen;
+      wantedDocument = { id: () => linked, restore: async () => { if (currentOpen === since && available(linked)) await openDocument(linked, false); } };
+      void synchronize();
+    }
   });
   const initial = hashId || prefs.lastDocument;
   let startupOpen = currentOpen;
@@ -114,49 +167,50 @@ export async function start(account: User) {
     startupOpen = currentOpen;
     await opening;
   }
-  await synchronize();
+  requestAnimationFrame(() => setTimeout(startWorker));
   // A new device only learns lastDocument during sync. Never override a user
   // selection (including one still loading) with this delayed startup choice.
-  if (!activeId && currentOpen === startupOpen) {
+  // Sync downloads the wanted document first and restores it before the rest of the library.
+  const restore = async () => {
+    if (activeId || currentOpen !== startupOpen) return;
     const restored = available(hashId) ? hashId : prefs.lastDocument;
     if (available(restored)) await openDocument(restored, false);
-  }
+  };
+  const startup = { id: () => hashId || prefs.lastDocument, restore }; wantedDocument = startup;
+  await synchronize();
+  if (wantedDocument === startup) wantedDocument = undefined;
+  await restore();
   setInterval(() => void synchronize(), 20000);
 }
 function status(message?: 'local-error' | 'saving' | 'auth-required') {
-  if (!activeId) { $('#main').dataset.saveState = online ? 'idle' : 'offline'; return; }
-  const d = records.get(activeId)!;
-  $('#main').dataset.saveState = message || (localError ? 'local-error' : !online ? 'offline' : d.dirty || d.localOnly ? 'syncing' : 'saved');
+  const d = records.get(activeId); const main = $('#main');
+  const next = !d ? (online ? 'idle' : 'offline') : message || (localError ? 'local-error' : !online ? 'offline' : d.dirty || d.localOnly ? 'syncing' : 'saved');
+  if (main.dataset.saveState !== next) main.dataset.saveState = next;
 }
+// The list lives in the navigation dialog, so it is only drawn while the dialog is open.
+let listStale = true;
 function renderList() {
   window.dispatchEvent(new Event('ed-documents'));
-  const pins = prefs.pins || [];
-  const docs = [...records.values()].filter(d => !d.purgedAt && Boolean(d.deletedAt) === showingTrash && (!matches || matches.has(d.id))).sort((a, b) => Number(pins.includes(b.id)) - Number(pins.includes(a.id)) || b.updatedAt - a.updatedAt);
+  listStale = true;
+  if ($<HTMLDialogElement>('#navigation').open) drawList();
+}
+function drawList() {
+  listStale = false;
+  const pins = new Set<string>(prefs.pins || []);
+  const docs = [...records.values()].filter(d => !d.purgedAt && Boolean(d.deletedAt) === showingTrash && (!matches || matches.has(d.id))).sort((a, b) => Number(pins.has(b.id)) - Number(pins.has(a.id)) || b.updatedAt - a.updatedAt);
   $('#list-label').textContent = showingTrash ? 'TRASH' : searchQuery ? 'SEARCH RESULTS' : 'YOUR DOCUMENTS'; $('#doc-count').textContent = String(docs.length);
-  $('#doc-list').innerHTML = docs.length ? docs.map(d => `<div class="doc-item ${d.id === activeId ? 'active' : ''}"><button class="doc-row ${d.id === activeId ? 'active' : ''}" data-id="${d.id}" ${d.id === activeId ? 'aria-current="page"' : ''}><span class="document-glyph" aria-hidden="true">≡</span><span class="doc-name">${escape(d.title)}</span>${d.dirty || d.localOnly ? '<span class="pending-dot" title="Pending sync"></span>' : ''}</button>${showingTrash ? '' : `<button class="pin-button" data-pin="${d.id}" aria-label="${pins.includes(d.id) ? 'Unpin' : 'Pin'} ${escape(d.title)}" aria-pressed="${pins.includes(d.id)}" title="${pins.includes(d.id) ? 'Unpin' : 'Pin to top'}"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 3h6v6l3 3v3H6v-3l3-3V3M12 15v6"/></svg></button>`}</div>`).join('') : `<p class="list-empty">${searchQuery ? 'No matching documents.' : showingTrash ? 'Trash is empty.' : 'Your first note starts here.'}</p>`;
-  $('#doc-list').querySelectorAll<HTMLButtonElement>('[data-id]').forEach(button => button.onclick = () => {
-    if (showingTrash) { const id = button.dataset.id!; const d = dialog('Restore document', `<p>${escape(records.get(id)!.title)}</p><button class="primary" id="restore-trash">Restore</button>`); d.querySelector('#restore-trash')!.addEventListener('click', () => { void setDeleted(id, false); d.close(); }); }
-    else void openDocument(button.dataset.id!);
-  });
-  $('#doc-list').querySelectorAll<HTMLButtonElement>('[data-pin]').forEach(button => button.onclick = () => {
-    const id = button.dataset.pin!;
-    markPreference('pins', pins.includes(id) ? pins.filter((pin: string) => pin !== id) : [...pins, id]);
-    renderList(); $('#doc-list').querySelector<HTMLButtonElement>(`[data-pin="${id}"]`)?.focus();
-  });
-
+  $('#doc-list').innerHTML = docs.length ? docs.map(d => `<div class="doc-item ${d.id === activeId ? 'active' : ''}"><button class="doc-row ${d.id === activeId ? 'active' : ''}" data-id="${d.id}" ${d.id === activeId ? 'aria-current="page"' : ''}><span class="document-glyph" aria-hidden="true">≡</span><span class="doc-name">${escape(d.title)}</span>${d.dirty || d.localOnly ? '<span class="pending-dot" title="Pending sync"></span>' : ''}</button>${showingTrash ? '' : `<button class="pin-button" data-pin="${d.id}" aria-label="${pins.has(d.id) ? 'Unpin' : 'Pin'} ${escape(d.title)}" aria-pressed="${pins.has(d.id)}" title="${pins.has(d.id) ? 'Unpin' : 'Pin to top'}"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 3h6v6l3 3v3H6v-3l3-3V3M12 15v6"/></svg></button>`}</div>`).join('') : `<p class="list-empty">${searchQuery ? 'No matching documents.' : showingTrash ? 'Trash is empty.' : 'Your first note starts here.'}</p>`;
 }
 async function enqueue(url: string, method: string, body: any) {
   const operation: Operation = { id: method === 'PATCH' && body.title !== undefined ? `rename-${url.split('/')[2]}` : crypto.randomUUID(), version: crypto.randomUUID(), path: url, method, body, createdAt: Date.now() };
-  try { await cache.put('ops', operation.id, operation);  void synchronize(); } catch (error) { localFailure(error); }
+  // Push only: server changes arrive as events, and pulling the whole library for every queued edit is wasted work.
+  try { await cache.put('ops', operation.id, operation); void synchronize(false); } catch (error) { localFailure(error); }
 }
 async function newDocument(title = 'Untitled', initialMarkdown?: string) {
   const id = crypto.randomUUID(); const record: CachedDoc = { id, title, createdAt: Date.now(), updatedAt: Date.now(), revision: 0, mirrorRevision: -1, deletedAt: null, localOnly: true, dirty: true };
-  if (initialMarkdown !== undefined) {
-    const doc = new Y.Doc(); const fragment = doc.getXmlFragment('default');
-    updateYFragment(doc, fragment, schema.nodeFromJSON(parseMarkdown(initialMarkdown)), { mapping: initProseMirrorDoc(fragment, schema).mapping, isOMark: new Map() });
-    record.state = b64(Y.encodeStateAsUpdate(doc)); record.markdown = serializeMarkdown(yDocToProsemirrorJSON(doc, 'default')); doc.destroy();
-  }
-  records.set(id, record); renderList();
+  // The worker converts and stores imported Markdown before the document opens and reads it.
+  if (initialMarkdown !== undefined) { await ask({ type: 'import', id, markdown: initialMarkdown }); record.cached = true; }
+  records.set(id, record); renderList(); index(id, title);
   const persistTask = persist(record); void openDocument(id).then(async () => {
     if (activeId !== id) return;
     if (title === 'Untitled') { const input = $<HTMLInputElement>('#document-title'); input.focus(); input.select(); } else editor?.commands.focus('end');
@@ -164,71 +218,138 @@ async function newDocument(title = 'Untitled', initialMarkdown?: string) {
   await persistTask; await enqueue('/documents', 'POST', { id, title }); return id;
 }
 async function getOpen(id: string): Promise<OpenDoc> {
-  let existing = opened.get(id); if (existing) { existing.touched = Date.now(); return existing; }
-  const record = records.get(id)!; const doc = new Y.Doc();
-  if (record.state) Y.applyUpdate(doc, unb64(record.state));
-  const persistence = new IndexeddbPersistence(`ed:${user.id}:doc:${id}`, doc);
-  const entry: OpenDoc = { doc, persistence, touched: Date.now(), generation: 0 }; opened.set(id, entry);
-  await persistence.whenSynced;
-  doc.on('update', () => {
-    entry.generation++; const current = records.get(id); if (!current) return;
-    current.dirty = true;
-    if (id === activeId) status('saving');
-    clearTimeout(entry.timer); entry.timer = setTimeout(() => void saveLocal(id), 60);
-  });
-  connect(id, entry);
-  return entry;
+  let existing = opened.get(id); if (existing) { existing.touched = Date.now(); await existing.ready; return existing; }
+  const doc = new Y.Doc(); const persistence = new IndexeddbPersistence(`ed:${user.id}:doc:${id}`, doc);
+  const entry: OpenDoc = { doc, persistence, awareness: new Awareness(doc), touched: Date.now(), generation: 0 }; opened.set(id, entry);
+  entry.ready = (async () => {
+    // The saved snapshot and y-indexeddb's updates load in parallel; Yjs merges them in any order.
+    const saved = records.get(id)?.cached ? await stored(id).catch(() => undefined) : undefined;
+    if (saved?.state) Y.applyUpdate(doc, unb64(saved.state));
+    await persistence.whenSynced;
+    // The worker loads the same stored state itself, then mirrors every later update.
+    post({ type: 'open', id });
+    doc.on('update', (update: Uint8Array) => {
+      post({ type: 'update', id, update });
+      entry.generation++; const current = records.get(id); if (!current) return;
+      // y-indexeddb has already stored this update; record that the document awaits sync.
+      if (!current.dirty) { current.dirty = true; persist(current).catch(() => {}); }
+      if (id === activeId) status('saving');
+      scheduleSave(id, entry);
+    });
+    connect(id, entry);
+  })();
+  await entry.ready; return entry;
 }
+// A snapshot re-encodes the whole document for the offline copy, search and export.
+// The worker does it when typing pauses, and at least every five seconds.
+function scheduleSave(id: string, entry: OpenDoc) {
+  clearTimeout(entry.timer); entry.pendingSince ??= Date.now();
+  const delay = Math.max(0, Math.min(1000, entry.pendingSince + 5000 - Date.now()));
+  entry.timer = setTimeout(() => void saveLocal(id).catch(() => {}), delay);
+}
+// The provider's code loads when the first document connects, after it has opened from the local copy.
+let Provider: typeof import('@hocuspocus/provider').HocuspocusProvider | undefined;
 function connect(id: string, entry: OpenDoc) {
-  const record = records.get(id); if (!online || !csrf || entry.provider || record?.localOnly || record?.deletedAt) return;
-  const provider = new HocuspocusProvider({ url: `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/collaboration`, name: id, document: entry.doc, token: () => csrf,
+  const record = records.get(id); if (!online || !csrf || entry.provider || opened.get(id) !== entry || record?.localOnly || record?.deletedAt) return;
+  if (!Provider) { import('@hocuspocus/provider').then(module => { Provider = module.HocuspocusProvider; connect(id, entry); }, () => {}); return; }
+  const provider = new Provider({ url: `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/collaboration`, name: id, document: entry.doc, awareness: entry.awareness, token: () => csrf,
     onSynced: () => { provider.sendStateless('flush'); },
     onAuthenticationFailed: () => { if (id === activeId) status('auth-required'); },
     onStateless: async ({ payload }) => {
       const event = JSON.parse(payload);
       if (event.type !== 'persisted') return;
-      const generation = entry.generation; const signature = persistenceSignature(Y.encodeStateAsUpdate(entry.doc));
+      const generation = entry.generation; const signature = documentSignature(entry.doc);
       const hash = [...new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(signature)))].map(b => b.toString(16).padStart(2, '0')).join('');
       if (hash === event.stateHash && generation === entry.generation) {
         const d = records.get(id)!; d.dirty = false; await saveLocal(id); if (id === activeId) status(); renderList();
       }
     },
-    onAwarenessUpdate: () => { if (id === activeId) { const names = [...(provider.awareness?.getStates().values() || [])].map((s: any) => s.user?.name).filter(Boolean); $('#people').textContent = names.length > 1 ? `${names.length} people here` : ''; } },
+    onAwarenessUpdate: () => { if (id === activeId) showPeople(entry.awareness); },
   });
   entry.provider = provider;
 }
+// Destroying a provider destroys its awareness too, so the next connection gets a fresh one.
+function disconnect(entry: OpenDoc) {
+  if (!entry.provider) return;
+  entry.provider.destroy(); entry.provider = undefined; entry.awareness = new Awareness(entry.doc);
+}
+function showPeople(awareness: Awareness) {
+  const names = [...awareness.getStates().values()].map((s: any) => s.user?.name).filter(Boolean);
+  const people = names.length > 1 ? `${names.length} people here` : ''; if ($('#people').textContent !== people) $('#people').textContent = people;
+}
 async function saveLocal(id: string) {
-  const entry = opened.get(id); const record = records.get(id); if (!entry || !record) return;
-  clearTimeout(entry.timer); entry.timer = undefined;
-  record.state = b64(Y.encodeStateAsUpdate(entry.doc)); record.markdown = serializeMarkdown(yDocToProsemirrorJSON(entry.doc, 'default'));
-  entry.localWrite = persist(record); await entry.localWrite;
-  worker.postMessage({ type: 'index', docs: [record] }); if (id === activeId) { status(); updateWordCount(); }
+  const entry = opened.get(id); if (!entry || !records.has(id)) return;
+  clearTimeout(entry.timer); entry.timer = undefined; entry.pendingSince = undefined;
+  // The worker stores a snapshot (and indexes its text) only if the document changed since the last one.
+  let saved: boolean;
+  try { saved = await ask<boolean>({ type: 'save', id }); } catch (error) { localFailure(error); throw error; }
+  // Sync may have replaced the record object in the meantime.
+  const record = records.get(id); if (!record) return;
+  if (saved) record.cached = true;
+  await persist(record);
+  if (id === activeId) status();
 }
 async function flushLocal() { await Promise.all([...opened.keys()].map(saveLocal)); }
 async function openDocument(id: string, focus = true) {
-  const count = ++currentOpen; saveCursor(); const previous = activeId;
-  if (previous) void saveLocal(previous);
+  // The previous document's snapshot stays scheduled; y-indexeddb already holds its edits.
+  const count = ++currentOpen; saveCursor();
   const record = records.get(id); if (!record) return;
-  if (!record.state && !record.localOnly) {
+  if (!record.cached && !record.localOnly) {
     if (!online) { toast('This document has not finished downloading for offline use.'); return; }
     try { await fetchState(id); } catch (error: any) { toast(error.message); return; }
   }
   const entry = await getOpen(id); if (count !== currentOpen) return;
-  editor?.destroy(); editor = undefined; activeId = id; markPreference('lastDocument', id); history.replaceState(null, '', `#${id}`);
+  hideEditor(); activeId = id; markPreference('lastDocument', id); history.replaceState(null, '', `#${id}`);
   $('#empty').hidden = true; $('#document').hidden = false; $<HTMLInputElement>('#document-title').value = record.title;
   if (focus) closeMenu(false);
-  $('#editor-mount').replaceChildren();
-  editor = new Editor({ element: $('#editor-mount'), extensions: [...extensions(), Collaboration.configure({ document: entry.doc }), ...(entry.provider ? [CollaborationCaret.configure({ provider: entry.provider, user: { name: user.username, color: ['#557a59', '#617daf', '#ab6f47', '#9275a9'][user.username.charCodeAt(0) % 4] } })] : [])], editorProps: { attributes: { class: 'prose', spellcheck: 'true', 'aria-label': 'Document content', 'data-placeholder': 'Start writing…', role: 'textbox', 'aria-multiline': 'true' } },
-    onUpdate: () => { updateWordCount(); }, onSelectionUpdate: () => { saveCursor(); updateToolbar(); },
-  });
-  restoreCursor(focus); updateWordCount(); renderList(); status();
+  // An editor built before its document's provider was replaced holds a destroyed awareness.
+  let live = editors.get(id); if (live && live.awareness !== entry.awareness) { dropEditor(id); live = undefined; }
+  const reused = Boolean(live); live ??= createEditor(entry);
+  editors.delete(id); editors.set(id, live); editor = live.editor;
+  $('#editor-mount').replaceChildren(editor.view.dom); keepEditorStyle();
+  restoreCursor(focus, reused); $('#word-count').textContent = live.words ?? ''; if (live.words === undefined) countWordsSoon();
+  updateToolbar(); showPeople(entry.awareness); renderList(); status();
   if ($<HTMLDialogElement>('#navigation').open) documentOptions();
+  for (const key of editors.keys()) if (editors.size > keptEditors && key !== activeId) dropEditor(key);
   while (opened.size > 8) {
     const candidate = [...opened].filter(([key, value]) => key !== activeId && !records.get(key)?.dirty).sort((a, b) => a[1].touched - b[1].touched)[0];
-    if (!candidate) break; await saveLocal(candidate[0]); candidate[1].provider?.destroy(); await candidate[1].persistence.destroy(); candidate[1].doc.destroy(); opened.delete(candidate[0]);
+    if (!candidate) break; const [key, closing] = candidate;
+    await saveLocal(key); dropEditor(key); closing.provider?.destroy(); closing.awareness.destroy(); await closing.persistence.destroy(); closing.doc.destroy(); opened.delete(key); post({ type: 'close', id: key });
   }
 }
+function createEditor(entry: OpenDoc) {
+  const live = { awareness: entry.awareness } as LiveEditor;
+  live.editor = new Editor({ extensions: [...extensions(), Collaboration.configure({ document: entry.doc }), CollaborationCaret.configure({ provider: { awareness: entry.awareness }, user: { name: user.username, color: ['#557a59', '#617daf', '#ab6f47', '#9275a9'][user.username.charCodeAt(0) % 4] } })], editorProps: { attributes: { class: 'prose', spellcheck: 'true', 'aria-label': 'Document content', 'data-placeholder': 'Start writing…', role: 'textbox', 'aria-multiline': 'true' } },
+    // Kept editors still apply collaborators' edits; only the visible one updates the page.
+    onUpdate: () => { live.words = undefined; if (live.editor === editor) countWordsSoon(); },
+    onSelectionUpdate: () => { if (live.editor === editor) { saveCursorSoon(); updateToolbar(); } },
+  });
+  return live;
+}
+// Tiptap removes its shared stylesheet when an editor is destroyed with no other on
+// the page, and a kept editor can return after that.
+let editorStyle: HTMLStyleElement | null = null;
+function keepEditorStyle() {
+  const current = document.querySelector<HTMLStyleElement>('style[data-tiptap-style]');
+  if (current) editorStyle = current; else if (editorStyle) document.head.append(editorStyle);
+}
+// Takes the visible editor off the page, keeping it alive for a quick return.
+function hideEditor() {
+  if (!editor) return;
+  if (editor.view.hasFocus()) editor.view.dom.blur();
+  editor.view.dom.remove(); editor = undefined;
+  // Collaborators should not see a caret in a document this person has left.
+  editors.get(activeId)?.awareness.setLocalStateField('cursor', null);
+}
+function dropEditor(id: string) {
+  const live = editors.get(id); if (!live) return;
+  editors.delete(id); if (live.editor === editor) editor = undefined;
+  live.editor.destroy();
+}
+// Selection and scroll changes arrive on every keystroke; remember the cursor once they settle.
+const saveCursorSoon = debounce(() => saveCursor(), 400);
 function saveCursor() {
+  saveCursorSoon.cancel();
   if (!editor || !activeId || editor.isDestroyed) return;
   const sync = ySyncPluginKey.getState(editor.state); if (!sync?.binding) return;
   try {
@@ -237,19 +358,38 @@ function saveCursor() {
     markPreference(`cursor_${activeId}`, { anchor: Y.relativePositionToJSON(anchor), head: Y.relativePositionToJSON(head), scroll: $('#main').scrollTop });
   } catch { /* The initial editor transaction may not yet have a mapping. */ }
 }
-function restoreCursor(focus: boolean) {
-  const saved = prefs[`cursor_${activeId}`]; const sync = ySyncPluginKey.getState(editor!.state);
-  let anchor = 1; let head = 1;
-  if (saved && sync?.binding) {
-    anchor = relativePositionToAbsolutePosition(sync.doc, sync.type, Y.createRelativePositionFromJSON(saved.anchor), sync.binding.mapping) ?? 1;
-    head = relativePositionToAbsolutePosition(sync.doc, sync.type, Y.createRelativePositionFromJSON(saved.head), sync.binding.mapping) ?? anchor;
+// A kept editor still has its selection and layout; a new one starts from the saved
+// position and scrolls once its content has rendered.
+function restoreCursor(focus: boolean, reused: boolean) {
+  const saved = prefs[`cursor_${activeId}`];
+  if (!reused) {
+    const sync = ySyncPluginKey.getState(editor!.state); let anchor = 1; let head = 1;
+    if (saved && sync?.binding) {
+      anchor = relativePositionToAbsolutePosition(sync.doc, sync.type, Y.createRelativePositionFromJSON(saved.anchor), sync.binding.mapping) ?? 1;
+      head = relativePositionToAbsolutePosition(sync.doc, sync.type, Y.createRelativePositionFromJSON(saved.head), sync.binding.mapping) ?? anchor;
+    }
+    const max = editor!.state.doc.content.size; editor!.commands.setTextSelection({ from: Math.min(anchor, max), to: Math.min(head, max) });
   }
-  const max = editor!.state.doc.content.size; editor!.commands.setTextSelection({ from: Math.min(anchor, max), to: Math.min(head, max) });
   if (focus) editor!.commands.focus(undefined, { scrollIntoView: false });
-  requestAnimationFrame(() => { $('#main').scrollTop = saved?.scroll || 0; });
+  if (reused) $('#main').scrollTop = saved?.scroll || 0; else requestAnimationFrame(() => { $('#main').scrollTop = saved?.scroll || 0; });
 }
-function updateWordCount() { if (editor && !editor.isDestroyed) { const text = editor.getText().trim(); $('#word-count').textContent = `${text ? text.split(/\s+/).length : 0} words`; } }
-function updateToolbar() { if (!editor) return; $('#toolbar').querySelectorAll<HTMLButtonElement>('[data-command]').forEach(b => b.setAttribute('aria-pressed', String(editor!.isActive(b.dataset.command!)))); }
+// Counting walks the whole document, so it waits for a pause in typing. A kept editor remembers its count.
+const countWordsSoon = debounce(() => updateWordCount(), 300);
+function updateWordCount() {
+  if (!editor || editor.isDestroyed) return;
+  const text = editor.getText().trim(); const words = `${text ? text.split(/\s+/).length : 0} words`; $('#word-count').textContent = words;
+  const live = editors.get(activeId); if (live?.editor === editor) live.words = words;
+}
+let toolbarFrame = 0;
+function updateToolbar() {
+  if (toolbarFrame) return;
+  toolbarFrame = requestAnimationFrame(() => {
+    toolbarFrame = 0; if (!editor || editor.isDestroyed) return;
+    for (const button of $('#toolbar').querySelectorAll<HTMLButtonElement>('[data-command]')) {
+      const pressed = String(editor.isActive(button.dataset.command!)); if (button.getAttribute('aria-pressed') !== pressed) button.setAttribute('aria-pressed', pressed);
+    }
+  });
+}
 function command(name: string) {
   const chain = editor!.chain().focus();
   const commands: Record<string, () => any> = { bold: () => chain.toggleBold().run(), italic: () => chain.toggleItalic().run(), strike: () => chain.toggleStrike().run(), heading: () => chain.toggleHeading({ level: 2 }).run(), bulletList: () => chain.toggleBulletList().run(), orderedList: () => chain.toggleOrderedList().run(), taskList: () => chain.toggleTaskList().run(), blockquote: () => chain.toggleBlockquote().run(), codeBlock: () => chain.toggleCodeBlock().run(), undo: () => chain.undo().run(), redo: () => chain.redo().run(), table: () => chain.insertTable({ rows: 3, cols: 3, withHeaderRow: true }).run(), link: () => {
@@ -260,19 +400,43 @@ function command(name: string) {
   commands[name]?.(); updateToolbar();
 }
 async function fetchState(id: string) {
-  const remote = await api(`/documents/${id}/state`); const record = records.get(id); if (!record) return;
+  const remote = await api(`/documents/${id}/state`); if (!records.has(id)) return;
   const entry = opened.get(id);
-  if (entry) { Y.applyUpdate(entry.doc, unb64(remote.state), 'remote-fetch'); await saveLocal(id); }
-  else if (record.dirty && record.state) {
-    const doc = new Y.Doc(); Y.applyUpdate(doc, unb64(record.state)); Y.applyUpdate(doc, unb64(remote.state)); record.state = b64(Y.encodeStateAsUpdate(doc)); record.markdown = serializeMarkdown(yDocToProsemirrorJSON(doc, 'default')); doc.destroy(); await persist(record);
-  } else { record.state = remote.state; record.markdown = remote.markdown; await persist(record); }
-  worker.postMessage({ type: 'index', docs: [record] });
+  if (entry) { await entry.ready; Y.applyUpdate(entry.doc, unb64(remote.state), 'remote-fetch'); await saveLocal(id); return; }
+  // Pending local edits merge with the server's state in the worker, which also converts and indexes the result.
+  const merge = records.get(id)!.dirty && records.get(id)!.cached;
+  if (merge) await ask({ type: 'merge', id, state: remote.state }).catch(error => { localFailure(error); throw error; });
+  else await store(id, { state: remote.state, markdown: remote.markdown });
+  const record = records.get(id); if (!record) return;
+  record.cached = true; await persist(record);
+  if (!merge) index(id, record.title, remote.markdown);
 }
-async function synchronize() {
+let pullRequested = false; let pullRunning = false; let remoteChanges = Promise.resolve();
+let wantedDocument: { id: () => string | undefined; restore: () => Promise<void> } | undefined;
+const metaKeys = ['title', 'createdAt', 'updatedAt', 'deletedAt', 'revision', 'mirrorRevision', 'filename', 'purgedAt', 'localOnly'] as const;
+const pendingDocuments = async () => new Set((await cache.all<Operation>('ops')).filter(o => o.path.startsWith('/documents/')).map(o => o.path.split('/')[2]));
+// Pushes queued operations and, unless `pull` is false, merges the server's library.
+async function synchronize(pull = true) {
+  pullRequested ||= pull;
   if (syncRunning) { syncAgain = true; return; }
+  // The page's own session check answers the first sync. Offline, it is stale by the time a sync can run.
+  const startup = startupSession; startupSession = undefined;
   if (!navigator.onLine) { return; } syncRunning = true; syncAgain = false;
+  const pulling = pullRequested || !online; pullRequested = false;
   try {
-    const me = await api('/me'); if (me.user.id !== user.id) throw new Error('Account changed. Reload this page.'); setCsrf(me.csrf); online = true; $('#sync-error').hidden = true;
+    if (pulling || !csrf || startup) {
+      const me: Session = await (startup ?? api('/me'));
+      if (startup) {
+        // The page started as the cached account. Reload as the one the server reports, which may need a new password.
+        let saved = true; try { localStorage.setItem('ed-user', JSON.stringify(me.user)); } catch { saved = false; }
+        // Reloading without the new account saved would start as the cached one again.
+        if (saved && (me.user.id !== user.id || me.user.mustChangePassword)) { location.reload(); return; }
+      }
+      if (me.user.id !== user.id) throw new Error('Account changed. Reload this page.');
+      if (startup) Object.assign(user, me.user);
+      setCsrf(me.csrf); online = true; $('#sync-error').hidden = true;
+      for (const [id, entry] of opened) connect(id, entry);
+    }
     const pendingCreates = new Set((await cache.all<Operation>('ops')).filter(o => o.path === '/documents').map(o => o.body.id));
     for (const record of records.values()) if (record.localOnly && !pendingCreates.has(record.id)) await enqueue('/documents', 'POST', { id: record.id, title: record.title });
     const ops = (await cache.all<Operation>('ops')).sort((a, b) => a.createdAt - b.createdAt);
@@ -283,20 +447,19 @@ async function synchronize() {
         if ((await cache.get<Operation>('ops', op.id))?.version === op.version) { await cache.remove('ops', op.id); }
       } catch (error: any) { if (error.status === 400 || error.status === 404) { toast(`Could not sync an action: ${error.message}`); await cache.put('prefs', `failed_${op.id}`, op); await cache.remove('ops', op.id); } else throw error; }
     }
-    const serverPrefs = await api('/preferences'); prefs = { ...serverPrefs, ...prefs }; await cache.put('prefs', 'values', prefs);
-    const remote: DocMeta[] = await api('/documents');
-    const queued = await cache.all<Operation>('ops'); const changed = new Set(queued.filter(o => o.path.startsWith('/documents/')).map(o => o.path.split('/')[2]));
-    for (const d of remote) {
-      const existing = records.get(d.id);
-      if (d.deletedAt && existing?.dirty && !existing.deletedAt) await recoverDeleted(existing);
-      const next = { ...existing, ...d, localOnly: false } as CachedDoc;
-      if (changed.has(d.id) && existing) { next.title = existing.title; next.deletedAt = existing.deletedAt; }
-      records.set(d.id, next);
-      if (activeId === d.id && d.deletedAt) closeActive();
-      if (existing && activeId === d.id && document.activeElement !== $('#document-title')) $<HTMLInputElement>('#document-title').value = next.title;
-      await persist(next);
-      if (!d.deletedAt && (!next.state || !existing || d.revision !== existing.revision)) await fetchState(d.id);
+    if (pulling) {
+      pullRunning = true; await remoteChanges;
+      const serverPrefs = await api('/preferences'); prefs = { ...serverPrefs, ...prefs }; await cache.put('prefs', 'values', prefs);
+      const remote: DocMeta[] = await api('/documents');
+      const changed = await pendingDocuments();
+      // Download a document being restored on a new device, or a link to one not yet downloaded, first and open it before the rest of the library.
+      const wanted = wantedDocument?.id();
+      for (const d of wanted ? [...remote].sort((a, b) => Number(b.id === wanted) - Number(a.id === wanted)) : remote) {
+        await applyRemote(d, changed);
+        if (d.id === wanted && wantedDocument) { const { restore } = wantedDocument; wantedDocument = undefined; void restore(); }
+      }
     }
+    // Documents just created or restored on the server can now connect.
     for (const [id, record] of records) {
       if (record.deletedAt || record.localOnly) continue;
       if (record.dirty) await getOpen(id);
@@ -304,7 +467,13 @@ async function synchronize() {
     }
     if (!events) {
       events = new EventSource('/api/events');
-      events.addEventListener('document', e => { const d = JSON.parse((e as MessageEvent).data); const current = records.get(d.id); if (!current || current.revision !== d.revision || current.deletedAt !== d.deletedAt) { setTimeout(() => void synchronize(), 100); } });
+      events.addEventListener('document', e => {
+        const d: DocMeta = JSON.parse((e as MessageEvent).data); const current = records.get(d.id);
+        if (current && current.revision === d.revision && current.deletedAt === d.deletedAt) return;
+        // Apply just this document. A pull already in progress may have missed it, so pull again after it.
+        if (pullRunning) { void synchronize(); return; }
+        remoteChanges = remoteChanges.then(async () => { await applyRemote(d, await pendingDocuments()); renderList(); status(); }).catch(() => void synchronize());
+      });
       events.addEventListener('mirror-error', e => { const d = JSON.parse((e as MessageEvent).data); toast(d.error); });
       events.addEventListener('agent', e => window.dispatchEvent(new CustomEvent('ed-agent', { detail: JSON.parse((e as MessageEvent).data) })));
       events.onerror = () => { online = false; status(); };
@@ -312,31 +481,62 @@ async function synchronize() {
     }
     renderList(); status();
   } catch (error: any) {
-    online = false; if (error.status === 401) { status('auth-required'); $('#sync-error').hidden = false; $('#sync-error').innerHTML = '<button id="reauth">Sign in to sync your local changes</button>'; $('#reauth').onclick = reauthenticate; } else { status(); }
-  } finally { syncRunning = false; if (online && (syncAgain || (await cache.all('ops')).length)) setTimeout(() => void synchronize(), 250); }
+    pullRequested ||= pulling; online = false;
+    if (error.status === 401) {
+      status('auth-required'); $('#sync-error').hidden = false; $('#sync-error').innerHTML = '<button id="reauth">Sign in to sync your local changes</button>'; $('#reauth').onclick = reauthenticate;
+      // The session expired while the app was closed: ask now, over the documents that opened from the local copy.
+      if (startup) reauthenticate();
+    } else { status(); }
+  } finally { syncRunning = false; pullRunning = false; if (online && (syncAgain || (await cache.all('ops')).length)) setTimeout(() => void synchronize(pullRequested), 250); }
+}
+// Merges one document's server metadata into the local copy.
+async function applyRemote(d: DocMeta, pending: Set<string>) {
+  const existing = records.get(d.id);
+  if (d.deletedAt && existing?.dirty && !existing.deletedAt) await recoverDeleted(existing);
+  const next = { ...existing, ...d, localOnly: false } as CachedDoc;
+  if (pending.has(d.id) && existing) { next.title = existing.title; next.deletedAt = existing.deletedAt; }
+  records.set(d.id, next);
+  if (activeId === d.id && d.deletedAt) closeActive();
+  const title = $<HTMLInputElement>('#document-title');
+  if (existing && activeId === d.id && document.activeElement !== title && title.value !== next.title) title.value = next.title;
+  if (!existing || metaKeys.some(key => existing[key] !== next[key])) await persist(next);
+  if (existing?.title !== next.title) index(next.id, next.title);
+  // An editor connected to the server already receives new content over its socket.
+  if (!d.deletedAt && (!next.cached || !existing || d.revision !== existing.revision) && !opened.get(d.id)?.provider?.isSynced) await fetchState(d.id);
 }
 async function recoverDeleted(record: CachedDoc) {
   if (opened.has(record.id)) await saveLocal(record.id);
   const id = crypto.randomUUID(); const recovered = { ...record, id, title: `${record.title} (recovered offline edits)`, deletedAt: null, localOnly: true, dirty: true, createdAt: Date.now(), updatedAt: Date.now() };
+  const saved = record.cached ? await stored(record.id) : undefined; if (saved) await store(id, saved);
   records.set(id, recovered); await persist(recovered); await enqueue('/documents', 'POST', { id, title: recovered.title }); record.dirty = false;
   toast('A document was deleted elsewhere. Your pending edits were preserved in a recovered note.');
 }
-function closeActive() { editor?.destroy(); editor = undefined; activeId = ''; $('#document').hidden = true; $('#empty').hidden = false; closeMenu(false); status(); }
+function closeActive() { dropEditor(activeId); activeId = ''; $('#document').hidden = true; $('#empty').hidden = false; closeMenu(false); status(); }
 async function setDeleted(id: string, deleted: boolean) {
   const record = records.get(id)!; await saveLocal(id); record.deletedAt = deleted ? Date.now() : null;
-  if (deleted) { opened.get(id)?.provider?.destroy(); if (opened.has(id)) opened.get(id)!.provider = undefined; }
+  if (deleted) { const entry = opened.get(id); if (entry) disconnect(entry); if (id !== activeId) dropEditor(id); }
   await persist(record); if (activeId === id && deleted) closeActive(); renderList(); await enqueue(`/documents/${id}`, 'PATCH', { deleted, opId: crypto.randomUUID() });
 }
-async function exportOne() { if (!activeId) return; await saveLocal(activeId).catch(() => {}); const record = records.get(activeId)!; download(filename(record.title, record.id), record.markdown || ''); }
+// Open documents export from the worker's copy of the live document, which includes edits that local storage failed to save.
+async function markdownOf(id: string) {
+  const entry = opened.get(id);
+  if (entry) { await entry.ready; return ask<string>({ type: 'markdown', id }); }
+  return records.get(id)?.cached ? (await stored(id))?.markdown ?? '' : undefined;
+}
+async function exportOne() { if (!activeId) return; const record = records.get(activeId)!; download(filename(record.title, record.id), await markdownOf(activeId) || ''); }
 export async function exportAll() {
   await flushLocal().catch(() => {}); const { zipSync, strToU8 } = await import('fflate'); const files: Record<string, Uint8Array> = {};
-  for (const d of records.values()) if (!d.deletedAt) { if (d.state === undefined && online) await fetchState(d.id); if (d.state === undefined) throw new Error('Some documents are not cached. Reconnect to export the entire library.'); files[filename(d.title, d.id)] = strToU8(d.markdown || ''); }
+  for (const d of records.values()) if (!d.deletedAt) {
+    if (!d.cached && !opened.has(d.id) && online) await fetchState(d.id);
+    const text = await markdownOf(d.id); if (text === undefined) throw new Error('Some documents are not cached. Reconnect to export the entire library.');
+    files[filename(d.title, d.id)] = strToU8(text);
+  }
   download(`garnet-library-${new Date().toISOString().slice(0, 10)}.zip`, zipSync(files) as BlobPart, 'application/zip');
 }
 export async function importFiles(files: FileList | File[]) {
   for (const file of Array.from(files)) {
     if (file.size > 2 * 1024 * 1024) { toast(`${file.name} exceeds the 2 MB document limit.`); continue; }
-    const text = await file.text(); await newDocument(file.name.replace(/\.md$/i, ''), text);
+    try { await newDocument(file.name.replace(/\.md$/i, ''), await file.text()); } catch (error: any) { toast(`Could not import ${file.name}: ${error.message}`); }
   }
 }
 function closeMenu(focus = true) {
@@ -360,6 +560,7 @@ function documentOptions() {
   action('#settings-button', () => import('./settings').then(m => m.showSettings({ user, prefs, markPreference, exportAll, importFiles, account: showAccount })));
   action('#delete', () => setDeleted(id, true));
   const navigation = $<HTMLDialogElement>('#navigation');
+  if (listStale) drawList();
   if (!navigation.open) navigation.showModal();
   $('#menu-button').setAttribute('aria-expanded', 'true');
 }
@@ -403,7 +604,7 @@ async function toggleAI() {
 }
 function reauthenticate() {
   const d = dialog('Sign in to sync', `<p>Your local changes are retained.</p><form><label>Username<input name="username" value="${escape(user.username)}" readonly autocomplete="username"></label><label>Password<input name="password" type="password" required autocomplete="current-password"></label><button class="primary">Sign in</button></form>`);
-  d.querySelector('form')!.onsubmit = async e => { e.preventDefault(); try { const result = await api('/login', 'POST', Object.fromEntries(new FormData(e.currentTarget as HTMLFormElement))); setCsrf(result.csrf); d.close(); events?.close(); events = undefined; for (const entry of opened.values()) { entry.provider?.destroy(); entry.provider = undefined; } await synchronize(); if (activeId) await openDocument(activeId, false); } catch (error: any) { toast(error.message); } };
+  d.querySelector('form')!.onsubmit = async e => { e.preventDefault(); try { const result = await api('/login', 'POST', Object.fromEntries(new FormData(e.currentTarget as HTMLFormElement))); setCsrf(result.csrf); d.close(); events?.close(); events = undefined; for (const entry of opened.values()) disconnect(entry); await synchronize(); if (activeId) await openDocument(activeId, false); } catch (error: any) { toast(error.message); } };
 }
 function showAccount() {
   const d = dialog('Your account', `<p>${escape(user.username)}${user.admin ? ' · Admin' : ''}</p><form id="change-password"><label>Current password<input name="current" type="password" autocomplete="current-password" required></label><label>New password<input name="password" type="password" autocomplete="new-password" minlength="10" required></label><button>Change password</button></form><hr><button id="sign-out">Sign out and clear this device’s cache</button>`);
@@ -419,6 +620,6 @@ function showAccount() {
 }
 async function signOut() {
   try { await api('/logout', 'POST', {}); } catch { if (navigator.onLine) { toast('Could not end the server session. Try signing out again.'); return; } }
-  events?.close(); editor?.destroy(); for (const entry of opened.values()) { entry.provider?.destroy(); await entry.persistence.destroy(); entry.doc.destroy(); }
+  events?.close(); for (const live of editors.values()) live.editor.destroy(); for (const entry of opened.values()) { entry.provider?.destroy(); await entry.persistence.destroy(); entry.doc.destroy(); }
   await cache.clearAccount(user.id); localStorage.removeItem('ed-user'); location.href = '/';
 }

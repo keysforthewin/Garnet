@@ -19,6 +19,7 @@ export function showAI(context: { panel: HTMLElement; records: Map<string, any>;
   let loadingHistory = false; let agentGeneration = 0;
   prompt.value = sessionStorage.getItem('ed-agent-draft') || ''; prompt.oninput = () => sessionStorage.setItem('ed-agent-draft', prompt.value);
   function refreshContext() {
+    if (panel.hidden) return; // Reopening the panel refreshes it.
     const selected = scope.value;
     const options = `<option value="current">Current document</option><option value="library">Whole library</option>${[...context.records.values()].filter(d => !d.deletedAt && !d.purgedAt && d.id !== context.active()).map(d => `<option value="${escape(d.id)}">${escape(d.title)}</option>`).join('')}`;
     if (scope.innerHTML !== options) { scope.innerHTML = options; scope.value = [...scope.options].some(option => option.value === selected) ? selected : 'current'; }
