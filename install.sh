@@ -59,15 +59,18 @@ fi
 port_given=false
 for arg in "$@"; do [[ $arg != --port=* ]] || port_given=true; done
 if [[ $port_given == false ]] && { exec 8<>/dev/tty; } 2>/dev/null; then
+  printf '\nGarnet opens in your web browser at http://127.0.0.1:%s\n' "$default_port" >&8
+  printf 'The number at the end is called the port. You can change it if you like.\n' >&8
+  printf "If you don't understand this, just press Enter.\n\n" >&8
   while true; do
-    printf 'App port [%s]: ' "$default_port" >&8
+    printf 'Port [%s]: ' "$default_port" >&8
     IFS= read -r chosen_port <&8 || die 'Port selection cancelled.'
     chosen_port=${chosen_port:-$default_port}
     if [[ $chosen_port =~ ^[0-9]{4,5}$ ]] && (( 10#$chosen_port >= 1024 && 10#$chosen_port <= 65535 )); then
       set -- "$@" "--port=$chosen_port"
       break
     fi
-    printf 'Enter a port from 1024 to 65535.\n' >&8
+    printf 'Please type a number from 1024 to 65535, or just press Enter.\n' >&8
   done
   exec 8>&-
 fi

@@ -416,11 +416,12 @@ app.use('/assets', (req, res, next) => {
   const file = encoding && `${name}.${encoding === 'br' ? 'br' : 'gz'}`;
   if (!file || !precompressed.has(file)) return next();
   res.vary('Accept-Encoding'); res.set({ 'Content-Type': type, 'Content-Encoding': encoding });
-  res.sendFile(path.join(publicDir, 'assets', file), { immutable: true, maxAge: '1y', acceptRanges: false }, error => { if (error) next(error); });
+  // Send relative to a root: given an absolute path, any dot directory in it (like ~/.local) counts as hidden and returns 404.
+  res.sendFile(file, { root: path.join(publicDir, 'assets'), immutable: true, maxAge: '1y', acceptRanges: false }, error => { if (error) next(error); });
 });
 app.use('/assets', express.static(path.join(publicDir, 'assets'), { immutable: true, maxAge: '1y' }));
 app.use(express.static(publicDir, { maxAge: 0 }));
-app.get('/{*path}', (_req, res) => res.sendFile(path.join(publicDir, 'index.html')));
+app.get('/{*path}', (_req, res) => res.sendFile('index.html', { root: publicDir }));
 app.use(errorHandler);
 const maintenance = setInterval(async () => {
   try {

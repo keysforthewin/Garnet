@@ -16,7 +16,9 @@ try {
   await writeFile(path.join(temporary, 'smoke-config.json'), JSON.stringify({ database: { uri: `mongodb://${database}:27017/release_test` }, data: '/work/data', dataParent: '/work', path: '/usr/local/bin:/usr/bin:/bin' }));
   docker(['network', 'create', prefix]);
   docker(['run', '-d', '--name', database, '--network', prefix, 'mongo:8.0']);
-  docker(['run', '-d', '--name', app, '--network', prefix, '--mount', `type=bind,src=${temporary},dst=/app,readonly`, '--tmpfs', '/work', '--workdir', '/app', 'node:24-bookworm-slim',
+  // Installs live under ~/.local, and a dot directory in the path has broken file serving before.
+  const installed = '/home/node/.local/share/garnet/current';
+  docker(['run', '-d', '--name', app, '--network', prefix, '--mount', `type=bind,src=${temporary},dst=${installed},readonly`, '--tmpfs', '/work', '--workdir', installed, 'node:24-bookworm-slim',
     'sh', '-c', 'node --input-type=module -e \'import {MongoClient} from "mongodb"; import {readFile} from "node:fs/promises"; const c = JSON.parse(await readFile("smoke-config.json")); const m = await new MongoClient(c.database.uri, {serverSelectionTimeoutMS:60000}).connect(); await m.close();\' && exec node scripts/service.mjs smoke-config.json']);
   docker(['exec', app, 'node', '--input-type=module', '-e', `
     import assert from 'node:assert/strict';
@@ -31,10 +33,25 @@ try {
     const listener=JSON.parse(await readFile('/work/data/runtime/listen.json','utf8'));
     assert.equal(listener.port,7777);
     await assert.rejects(access('/work/data/runtime/Caddyfile'));
-    assert.match(await fetch('http://127.0.0.1:7777').then(r=>r.text()), /<html/);
+    const page = await fetch('http://127.0.0.1:7777').then(r=>r.text());
+    assert.match(page, /<html/);
+    assert.match(await fetch('http://127.0.0.1:7777/a/deep/link').then(r=>r.text()), /<html/);
+    const assets = [...page.matchAll(new RegExp('(?:src|href)="(/assets/[^"]+)"', 'g'))].map(match => match[1]);
+    assert.ok(assets.length >= 3);
+    for (const asset of assets) {
+      const plain = await fetch('http://127.0.0.1:7777' + asset, { headers: { 'accept-encoding': 'identity' } });
+      assert.equal(plain.status, 200, asset);
+      const text = await plain.text();
+      for (const encoding of ['br', 'gzip']) {
+        const response = await fetch('http://127.0.0.1:7777' + asset, { headers: { 'accept-encoding': encoding } });
+        assert.equal(response.status, 200, asset + ' as ' + encoding);
+        assert.equal(response.headers.get('content-encoding'), encoding);
+        assert.equal(await response.text(), text);
+      }
+    }
     const login=await fetch('http://127.0.0.1:7777/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:'admin',password:'password'})});
     assert.equal(login.status,200);
-    console.log('Packaged app healthy; frontend and first login work with production-only dependencies.');
+    console.log('Packaged app healthy; frontend assets in every encoding, deep links, and first login work with production-only dependencies.');
   `]);
 } catch (error) {
   try { docker(['logs', app]); } catch {}
