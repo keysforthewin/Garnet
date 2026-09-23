@@ -34,4 +34,4 @@ For replacement videos, sign in to the repository's README editor, attach the fi
 
 ## Stop the demo services
 
-Stop the foreground demo server with Ctrl+C. The production app, HTTPS service, and MongoDB remain running.
+Stop the foreground demo server with Ctrl+C. The production app and MongoDB remain running.

@@ -17,6 +17,7 @@ export function verifyArchive(bytes, checksums) {
 export function parseOptions(args) {
   const options = {};
   for (const arg of args) {
+    if (arg === '--yes') { options.yes = true; continue; }
     const match = /^--(root|stage|database|mongo-uri|port)=(.+)$/.exec(arg);
     if (!match) throw Error(`Unknown option: ${arg.split('=')[0]}`);
     options[match[1]] = match[2];

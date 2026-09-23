@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile, readFile, readlink, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, readlink, rm, symlink } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
@@ -8,7 +8,10 @@ import path from 'node:path';
 async function fixture(t, scenario = {}) {
   const base = await mkdtemp(path.join(os.tmpdir(), 'garnet-host-test-'));
   t.after(() => rm(base, { recursive: true, force: true }));
-  await mkdir(path.join(base, 'home/.config/systemd/user'), { recursive: true });
+  const home = await mkdtemp(path.join(os.tmpdir(), 'garnet-user-test-'));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  await symlink(home, path.join(base, 'home'));
+  await mkdir(path.join(home, '.config/systemd/user'), { recursive: true });
   await mkdir(path.join(base, 'bin'));
   await writeFile(path.join(base, 'bin/docker'), '#!/bin/sh\nexit 99\n', { mode: 0o755 });
   await writeFile(path.join(base, 'scenario.json'), JSON.stringify(scenario));
@@ -113,4 +116,46 @@ test('automatic container install pins the image and reinstallation preserves th
   assert.ok(!calls.some(parts => ['docker', 'podman'].includes(path.basename(parts[0])) && parts.includes('create')));
   assert.ok(!calls.some(parts => parts.includes('enable') && parts.includes('garnet-update.timer')));
   assert.deepEqual(JSON.parse(await readFile(file, 'utf8')).database, config.database);
+});
+
+test('an interrupted container creation resumes with the original volume', async t => {
+  const base = await fixture(t, { noHost: true, failCreate: true });
+  const first = await install(base, 'interrupted');
+  assert.notEqual(first.status, 0);
+  assert.match(first.stderr, /Simulated container creation failure/);
+  assert.equal(await readFile(path.join(base, 'mock-volume'), 'utf8'), 'notes');
+  await writeFile(path.join(base, 'scenario.json'), JSON.stringify({ noHost: true }));
+  await writeFile(path.join(base, 'commands.jsonl'), '');
+  const retry = await install(base, 'resumed');
+  assert.equal(retry.status, 0, retry.stderr);
+  const calls = await commands(base);
+  assert.ok(!calls.some(parts => parts.includes('volume') && parts.includes('create')));
+  assert.ok(!calls.some(parts => parts.includes('pull')));
+  assert.equal(await readFile(path.join(base, 'mock-volume'), 'utf8'), 'notes');
+});
+
+async function removeInstallation(base) {
+  return spawnSync(process.execPath, ['--import', path.resolve('tests/fixtures/installer-host.mjs'), 'scripts/manage.mjs', 'uninstall-locked', `--root=${base}`], {
+    env: { ...process.env, GARNET_TEST_ROOT: base }, encoding: 'utf8', timeout: 15000,
+  });
+}
+for (const container of [true, false]) test(`uninstall cleans managed files and ${container ? 'removes managed MongoDB' : 'preserves host MongoDB'}`, async t => {
+  const base = await fixture(t, { noHost: container });
+  assert.equal((await install(base, 'first')).status, 0);
+  const home = await readlink(path.join(base, 'home'));
+  const result = await removeInstallation(base);
+  assert.equal(result.status, 0, result.stderr);
+  await assert.rejects(readFile(path.join(base, 'install.json')), { code: 'ENOENT' });
+  await assert.rejects(readFile(path.join(home, '.local/bin/garnet')), { code: 'ENOENT' });
+  await assert.rejects(readFile(path.join(home, '.config/systemd/user/garnet.service')), { code: 'ENOENT' });
+  if (!container) assert.match(result.stdout, /host MongoDB.*preserved/);
+});
+test('uninstall refuses a database volume without ownership labels', async t => {
+  const base = await fixture(t, { noHost: true });
+  assert.equal((await install(base, 'first')).status, 0);
+  await writeFile(path.join(base, 'scenario.json'), JSON.stringify({ foreignVolume: true }));
+  const result = await removeInstallation(base);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /ownership/);
+  assert.equal(await readFile(path.join(base, 'mock-volume'), 'utf8'), 'notes');
 });

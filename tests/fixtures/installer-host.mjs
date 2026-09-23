@@ -4,7 +4,7 @@ import os from 'node:os';
 import net from 'node:net';
 import { EventEmitter } from 'node:events';
 import { syncBuiltinESMExports } from 'node:module';
-import { readFileSync, appendFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, appendFileSync, writeFileSync, existsSync, unlinkSync } from 'node:fs';
 import path from 'node:path';
 import { MongoClient } from 'mongodb';
 
@@ -23,7 +23,10 @@ childProcess.spawnSync = (command, args) => {
     if (args.includes('show-environment') || args.includes('is-active')) status = 0;
     if (args.includes('is-enabled')) status = scenario.legacy || args.includes('docker.service') ? 0 : 1;
   } else if (name === 'loginctl') status = 0;
-  else if (name === 'podman' || name === 'docker') status = args[0] === 'info' && name === 'docker' ? 0 : 1;
+  else if (name === 'podman' || name === 'docker') {
+    status = args[0] === 'info' && name === 'docker' ? 0 : 1;
+    if (args[1] === 'inspect') status = existsSync(path.join(base, `mock-${args[0]}`)) ? 0 : 1;
+  }
   else throw Error(`Simulator refused command: ${name}`);
   return { status };
 };
@@ -46,9 +49,22 @@ childProcess.execFileSync = (command, args) => {
   }
   if (name === 'loginctl') return 'yes';
   if (name === 'docker' || name === 'podman') {
-    if (args[0] === 'container' && args[1] === 'inspect') return JSON.stringify([{ State: { Running: !scenario.stoppedContainer }, Config: { Labels: { app: 'garnet' } }, Mounts: [{ Name: 'garnet-mongo', Destination: '/data/db' }] }]);
+    const state = kind => path.join(base, `mock-${kind}`);
+    if (args[1] === 'inspect' && ['container', 'volume'].includes(args[0])) {
+      if (!existsSync(state(args[0]))) throw Object.assign(Error('missing'), { stderr: 'No such object' });
+      if (args[0] === 'volume') return JSON.stringify([{ Labels: { app: scenario.foreignVolume ? 'other' : 'garnet' } }]);
+      return JSON.stringify([{ State: { Running: !scenario.stoppedContainer }, Config: { Labels: { app: 'garnet' } }, Mounts: [{ Name: 'garnet-mongo', Destination: '/data/db' }] }]);
+    }
     if (args[0] === 'image' && args[1] === 'inspect') return JSON.stringify([{ RepoDigests: [`docker.io/library/mongo@sha256:${'a'.repeat(64)}`] }]);
-    if (['pull', 'volume', 'create', 'rm'].includes(args[0])) return '';
+    if (args[0] === 'pull') { writeFileSync(state('image'), ''); return ''; }
+    if (args[0] === 'volume' && args[1] === 'create') { writeFileSync(state('volume'), 'notes'); return ''; }
+    if (args[0] === 'create') {
+      if (scenario.failCreate) throw Error('Simulated container creation failure');
+      writeFileSync(state('container'), ''); return '';
+    }
+    if (args[0] === 'rm') { unlinkSync(state('container')); return ''; }
+    if (args[1] === 'rm') { unlinkSync(state(args[0])); return ''; }
+
   }
   throw Error(`Simulator refused command: ${name}`);
 };

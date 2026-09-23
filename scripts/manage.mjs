@@ -4,6 +4,9 @@ import { existsSync, accessSync, constants } from 'node:fs';
 import { availablePort, appPort, validPort } from './ports.mjs';
 import { retireHttps } from './retire-https.mjs';
 import os from 'node:os';
+import { setupPath } from './shell-path.mjs';
+import { uninstall } from './uninstall.mjs';
+import { createInterface } from 'node:readline/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { MongoClient } from 'mongodb';
@@ -66,37 +69,43 @@ async function installPodman() {
   if (!succeeds('podman', ['info'])) throw Error('Podman rootless setup failed. Check user namespaces and subordinate UID/GID support.');
   return which('podman');
 }
-async function containerDatabase(database, httpPort) {
-  if (database.engine) {
-    const info = JSON.parse(output(database.engine, ['container', 'inspect', database.container]))[0];
-    if (info.State.Running) return database;
-    const previousPort = Number(new URL(database.uri).port);
-    const port = await availablePort(previousPort, [httpPort]);
-    if (port === previousPort) return database;
-    if (info.Config.Labels?.app !== 'garnet' || !info.Mounts?.some(mount => mount.Name === database.volume && mount.Destination === '/data/db')) throw Error('Cannot change the port of an unrecognized database container. Its storage was preserved.');
-    // Recreate only our stopped container, retaining its named volume and image.
-    run(database.engine, ['rm', database.container]);
-    run(database.engine, ['create', '--name', database.container, '--label', 'app=garnet', '--publish', `127.0.0.1:${port}:27017`, '--volume', `${database.volume}:/data/db`, database.image, '--bind_ip_all']);
-    return { ...database, port, uri: `mongodb://127.0.0.1:${port}/ed` };
+async function containerDatabase(database, httpPort, base) {
+  const checkpoint = path.join(base, 'database-setup.json');
+  const inspect = (engine, kind, name) => {
+    try { return JSON.parse(output(engine, [kind, 'inspect', name]))[0]; }
+    catch (error) { if (/no such|not found|does not exist/i.test(String(error.stderr))) return null; throw error; }
+  };
+  if (!database.engine) {
+    const port = await availablePort(27018, [httpPort]);
+    if (process.arch === 'x64' && !/\bavx\b/.test(await readFile('/proc/cpuinfo', 'utf8'))) throw Error('MongoDB 8 requires an x86-64 CPU with AVX. Use --mongo-uri to connect to a compatible server.');
+    const engine = succeeds('podman', ['info']) ? which('podman') : succeeds('docker', ['info']) ? which('docker') : await installPodman();
+    const name = 'garnet-mongo';
+    if (succeeds(engine, ['container', 'inspect', name]) || succeeds(engine, ['volume', 'inspect', name])) throw Error('Existing garnet-mongo storage has no installation metadata. Preserve it and explicitly configure --mongo-uri.');
+    const image = 'docker.io/library/mongo:8.0';
+    const imageOwned = !succeeds(engine, ['image', 'inspect', image]);
+    database = { ...database, uri: `mongodb://127.0.0.1:${port}/ed`, port, engine, container: name, volume: name, image, imageOwned };
+    // Save ownership before creating resources, so an interrupted install can resume.
+    await atomicJSON(checkpoint, database);
   }
-  const port = await availablePort(27018, [httpPort]);
-  if (process.arch === 'x64' && !/\bavx\b/.test(await readFile('/proc/cpuinfo', 'utf8'))) throw Error('MongoDB 8 requires an x86-64 CPU with AVX. Use --mongo-uri to connect to a compatible server.');
-  const engine = succeeds('podman', ['info']) ? which('podman') : succeeds('docker', ['info']) ? which('docker') : await installPodman();
-  const name = 'garnet-mongo';
-  if (succeeds(engine, ['container', 'inspect', name])) throw Error('A garnet-mongo container already exists without installation metadata. Preserve it and explicitly configure --mongo-uri.');
-  if (succeeds(engine, ['volume', 'inspect', name])) throw Error('A garnet-mongo volume already exists. Restore its installation configuration instead of creating a new database.');
-  const image = 'docker.io/library/mongo:8.0';
-  run(engine, ['pull', image]);
-  const details = JSON.parse(output(engine, ['image', 'inspect', image]))[0];
+  const { engine, container, volume } = database;
+  let info = inspect(engine, 'container', container);
+  const storage = inspect(engine, 'volume', volume);
+  if (info && (info.Config.Labels?.app !== 'garnet' || !info.Mounts?.some(m => m.Name === volume && m.Destination === '/data/db'))) throw Error('Unrecognized database container. Its storage was preserved.');
+  if (storage && storage.Labels?.app !== 'garnet') throw Error('Unrecognized database volume. Its storage was preserved.');
+  if (info?.State.Running) return database;
+  if (path.basename(engine) === 'docker' && !succeeds('systemctl', ['is-enabled', '--quiet', 'docker.service']) && !succeeds('systemctl', ['--user', 'is-enabled', '--quiet', 'docker.service'])) run('sudo', ['systemctl', 'enable', '--now', 'docker.service']);
+  if (!succeeds(engine, ['image', 'inspect', database.image])) run(engine, ['pull', database.image]);
+  const details = JSON.parse(output(engine, ['image', 'inspect', database.image]))[0];
   const digest = details.RepoDigests?.[0];
   if (!digest || !/@sha256:[a-f0-9]{64}$/.test(digest)) throw Error('Cannot resolve a pinned MongoDB image digest.');
-  if (path.basename(engine) === 'docker' && !succeeds('systemctl', ['is-enabled', '--quiet', 'docker.service']) && !succeeds('systemctl', ['--user', 'is-enabled', '--quiet', 'docker.service'])) {
-    run('sudo', ['systemctl', 'enable', '--now', 'docker.service']);
-  }
-  run(engine, ['volume', 'create', '--label', 'app=garnet', name]);
-  try { run(engine, ['create', '--name', name, '--label', 'app=garnet', '--publish', `127.0.0.1:${port}:27017`, '--volume', `${name}:/data/db`, digest, '--bind_ip_all']); }
-  catch (error) { run(engine, ['volume', 'rm', name]); throw error; } // Newly created, never started: no user data exists yet.
-  return { ...database, uri: `mongodb://127.0.0.1:${port}/ed`, port, engine, container: name, volume: name, image: digest };
+  const port = await availablePort(database.port || Number(new URL(database.uri).port), [httpPort]);
+  const previousPort = Number(info?.NetworkSettings?.Ports?.['27017/tcp']?.[0]?.HostPort || new URL(database.uri).port);
+  database = { ...database, port, uri: `mongodb://127.0.0.1:${port}/ed`, image: digest };
+  await atomicJSON(checkpoint, database);
+  if (!storage) run(engine, ['volume', 'create', '--label', 'app=garnet', volume]);
+  if (info && port !== previousPort) { run(engine, ['rm', '--volumes', container]); info = null; }
+  if (!info) run(engine, ['create', '--name', container, '--label', 'app=garnet', '--publish', `127.0.0.1:${port}:27017`, '--volume', `${volume}:/data/db`, digest, '--bind_ip_all']);
+  return database;
 }
 function service(description, command, { extra = '', working, restart = 'on-failure', tail = '' } = {}) {
   return `[Unit]\nDescription=${description}\nAfter=network.target\nStartLimitIntervalSec=0\n${extra}\n[Service]\nType=simple\n${working ? `WorkingDirectory=${working.replaceAll('%', '%%')}\n` : ''}ExecStart=${command.map(qe).join(' ')}\nRestart=${restart}\nRestartSec=5\nKillMode=mixed\nTimeoutStopSec=60\n${tail}\n[Install]\nWantedBy=default.target\n`;
@@ -169,12 +178,12 @@ async function install(base, options) {
   const selectedPort = !config && !old && options.port ? await availablePort(port) : port;
   const data = config?.data || old?.data || path.join(base, 'data');
   for (const name of ['documents', 'runtime']) await mkdir(path.join(data, name), { recursive: true });
-  let database = await chooseDatabase({ existing: config?.database, legacy: old?.database, mode: options.database, uri: options['mongo-uri'], probe });
+  let database = await chooseDatabase({ existing: JSON.parse(await readFile(path.join(base, 'database-setup.json'), 'utf8').catch(error => { if (error.code === 'ENOENT') return 'null'; throw error; })) || config?.database, legacy: old?.database, mode: options.database, uri: options['mongo-uri'], probe });
   // Configure lingering before claiming unattended boot support.
   const user = os.userInfo().username;
   if (!succeeds('loginctl', ['enable-linger', user])) run('sudo', ['loginctl', 'enable-linger', user]);
   if (output('loginctl', ['show-user', user, '--property=Linger', '--value']) !== 'yes') throw Error('Could not enable user services at boot.');
-  if (database.kind === 'container') database = await containerDatabase(database, selectedPort);
+  if (database.kind === 'container') database = await containerDatabase(database, selectedPort, base);
   config = { ...config, version: 1, port: selectedPort, node: process.execPath, path: process.env.PATH, data, dataParent: config?.dataParent || old?.dataParent || base, database,
     autoUpdate: config?.autoUpdate ?? true };
   delete config.caddy;
@@ -207,7 +216,11 @@ async function install(base, options) {
   const sh = text => `'${text.replaceAll("'", "'\\''")}'`;
   await writeFile(launcher, `#!/bin/sh\nexec ${sh(config.node)} ${sh(path.join(base, 'current/scripts/manage.mjs'))} "$@" --root=${sh(base)}\n`, { mode: 0o755 });
   await chmod(launcher, 0o755);
-  console.log(`Installed ${version}. Open http://127.0.0.1:${await appPort(config)}\nMongoDB: ${new URL(config.database.uri).host}\nFirst login: admin / password; change the password when prompted.\nStarts at boot. Daily updates: ${config.autoUpdate ? 'on' : 'off'}.\nCommands: ${launcher} url | status | logs | update`);
+  await rm(path.join(base, 'database-setup.json'), { force: true });
+  const shellPath = await setupPath();
+  if (shellPath.changed) console.log(`Added ~/.local/bin to PATH in ${shellPath.file}.`);
+  if (!shellPath.active) console.log(`Open a new terminal, or run: ${shellPath.shell === 'fish' ? 'fish_add_path --path "$HOME/.local/bin"' : 'export PATH="$HOME/.local/bin:$PATH"'}`);
+  console.log(`Installed ${version}. Open http://127.0.0.1:${await appPort(config)}\nMongoDB: ${new URL(config.database.uri).host}\nFirst login: admin / password; change the password when prompted.\nStarts at boot. Daily updates: ${config.autoUpdate ? 'on' : 'off'}.\nCommands: garnet url | status | logs | update | uninstall`);
 }
 async function download(url) {
   const response = await fetch(url, { signal: AbortSignal.timeout(300000), headers: { 'User-Agent': 'Garnet-updater' } });
@@ -262,6 +275,20 @@ async function main() {
   const positional = args.filter(arg => !arg.startsWith('--'));
   const options = parseOptions(args.filter(arg => arg.startsWith('--')));
   const base = path.resolve(options.root || root);
+  if (command === 'uninstall') {
+    if (!options.yes) {
+      if (!process.stdin.isTTY) throw Error('Uninstall deletes Garnet and its managed notes database. Run garnet uninstall --yes to confirm.');
+      const prompt = createInterface({ input: process.stdin, output: process.stdout });
+      let answer;
+      try { answer = await prompt.question('Delete Garnet and all notes in its managed database? [y/N] '); } finally { prompt.close(); }
+      if (!/^y(es)?$/i.test(answer.trim())) { console.log('Uninstall cancelled.'); return; }
+    }
+    const config = await readConfig(base);
+    if (existsSync(path.join(units, 'garnet-update.timer'))) ctl('disable', '--now', 'garnet-update.timer');
+    if (existsSync(path.join(units, 'garnet-update.service'))) ctl('stop', 'garnet-update.service');
+    return run('flock', ['-n', '-E', '75', path.join(base, 'install.lock'), config.node, fileURLToPath(import.meta.url), 'uninstall-locked', `--root=${base}`]);
+  }
+  if (command === 'uninstall-locked') return uninstall(base);
   if (command === 'install') return install(base, options);
   if (command === 'update-locked') return update(base);
   if (command === 'update') {
@@ -295,7 +322,7 @@ async function main() {
     ctl(action === 'on' ? 'enable' : 'disable', '--now', 'garnet-update.timer');
     config.autoUpdate = action === 'on'; await atomicJSON(path.join(base, 'install.json'), config); return;
   }
-  console.log('Usage: garnet {start|stop|url|port NUMBER|status|logs|update|autoupdate on|off|status}');
+  console.log('Usage: garnet {start|stop|url|port NUMBER|status|logs|update|uninstall [--yes]|autoupdate on|off|status}');
 }
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   main().catch(error => { console.error(error.message); process.exitCode = 1; });

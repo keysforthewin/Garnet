@@ -25,11 +25,12 @@ This tests service installation without publishing. After release publication, s
 | Accessible Docker already installed | Reuse it without replacing the runtime |
 | MongoDB 8+ running on 27017 | Reuse it with the dedicated `garnet` database |
 | Authenticated host MongoDB | Explicit URI works; bad credentials fail without selecting another database |
-| Existing standard source install | Keep its original database, Markdown, and accounts; retire the HTTPS service |
+| Existing standard source install | Keep its original database, Markdown, and accounts |
+| Interrupted container creation | Rerun completes using its recorded volume without deleting notes |
+| Uninstall | Removes managed resources, preserves shared host MongoDB and PATH |
 | Repeated installation | Preserve selected backend, data, password and update preference |
 | Occupied app/database ports | Choose available alternatives, persist them, and print the correct HTTP URL |
 | Explicit HTTP port / later collision | Use the preference if available; otherwise choose and report a free port |
-| HTTPS removal | No HTTPS UI, certificate API, generated Caddyfile, or active HTTPS service |
 | Logout and reboot before login | App and managed database start and become healthy |
 | Host database starts late | App retries until the database is ready |
 | Container recreation with original volume | Notes and credentials survive |

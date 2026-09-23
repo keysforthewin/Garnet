@@ -29,6 +29,13 @@ exec 9>"$base/install.lock"
 flock -n 9 || die 'Another install or update is running.'
 
 node_bin=$(command -v node || true)
+# Reuse a private runtime left by an earlier attempt.
+if [[ -z $node_bin ]]; then
+  for candidate in "$base"/runtime/node-v24.*-linux-"$arch"/bin/node; do
+    if [[ -x $candidate ]] && "$candidate" --version >/dev/null 2>&1; then node_bin=$candidate; break; fi
+  done
+fi
+if [[ -n $node_bin ]]; then export PATH="$(dirname "$node_bin"):$PATH"; fi
 if [[ -z $node_bin ]] || ! "$node_bin" -e 'const [a,b]=process.versions.node.split(".").map(Number);process.exit((a===22&&b>=12)||a===24?0:1)' || ! command -v npm >/dev/null; then
   # Private runtime: never replace the user's system Node installation.
   command -v sha256sum >/dev/null || die 'sha256sum (coreutils) is required.'
@@ -44,6 +51,26 @@ if [[ -z $node_bin ]] || ! "$node_bin" -e 'const [a,b]=process.versions.node.spl
 fi
 export PATH="$(dirname "$node_bin"):$PATH"
 "$node_bin" --version >/dev/null || die 'The Node runtime is incompatible with this Linux installation.'
+# Read from the terminal: stdin contains this script when invoked with curl | bash.
+default_port=7777
+if [[ -f "$base/install.json" ]]; then
+  default_port=$("$node_bin" -e 'const c=require(process.argv[1]); console.log(c.port || 7777)' "$base/install.json")
+fi
+port_given=false
+for arg in "$@"; do [[ $arg != --port=* ]] || port_given=true; done
+if [[ $port_given == false ]] && { exec 8<>/dev/tty; } 2>/dev/null; then
+  while true; do
+    printf 'App port [%s]: ' "$default_port" >&8
+    IFS= read -r chosen_port <&8 || die 'Port selection cancelled.'
+    chosen_port=${chosen_port:-$default_port}
+    if [[ $chosen_port =~ ^[0-9]{4,5}$ ]] && (( 10#$chosen_port >= 1024 && 10#$chosen_port <= 65535 )); then
+      set -- "$@" "--port=$chosen_port"
+      break
+    fi
+    printf 'Enter a port from 1024 to 65535.\n' >&8
+  done
+  exec 8>&-
+fi
 # Stage a release without executing remote shell fragments or requiring git/build tools.
 "$node_bin" --input-type=module - "$scratch/release.json" "$scratch" <<'NODE'
 import { readFile, writeFile } from 'node:fs/promises';
