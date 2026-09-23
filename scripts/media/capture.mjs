@@ -191,7 +191,7 @@ try {
   const jobs = [];
   for (const provider of ['claude', 'codex']) {
     if (provider === 'codex') {
-      await alex.locator('#new-chat').click();
+      await alex.locator('#conversation').selectOption('');
       await alex.getByLabel('Agent', { exact: true }).selectOption('codex');
     }
     const prompt = provider === 'claude'

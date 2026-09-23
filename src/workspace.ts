@@ -95,6 +95,7 @@ function status(message?: 'local-error' | 'saving' | 'auth-required') {
   $('#main').dataset.saveState = message || (localError ? 'local-error' : !online ? 'offline' : d.dirty || d.localOnly ? 'syncing' : 'saved');
 }
 function renderList() {
+  window.dispatchEvent(new Event('ed-documents'));
   const pins = prefs.pins || [];
   const docs = [...records.values()].filter(d => !d.purgedAt && Boolean(d.deletedAt) === showingTrash && (!matches || matches.has(d.id))).sort((a, b) => Number(pins.includes(b.id)) - Number(pins.includes(a.id)) || b.updatedAt - a.updatedAt);
   $('#list-label').textContent = showingTrash ? 'TRASH' : searchQuery ? 'SEARCH RESULTS' : 'YOUR DOCUMENTS'; $('#doc-count').textContent = String(docs.length);

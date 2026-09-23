@@ -344,6 +344,8 @@ app.get('/api/conversations', async (_req, res) => res.json(await conversations.
 app.get('/api/conversations/:id/jobs', async (req, res) => res.json(await jobs.find({ conversationId: req.params.id }, { projection: { tokenHash: 0 } }).sort({ createdAt: 1 }).toArray()));
 app.post('/api/jobs', async (req, res) => {
   if (typeof req.body.prompt !== 'string' || !req.body.prompt.trim() || req.body.prompt.length > 50000) fail(400, 'Enter a prompt up to 50,000 characters.');
+  if (req.body.model !== undefined && (typeof req.body.model !== 'string' || req.body.model.length > 1024 || req.body.model.includes('\0'))) fail(400, 'Invalid model override.');
+  const modelOverride = req.body.model?.trim() || '';
   const conversationId = req.body.conversationId || randomUUID(); validId(conversationId);
   await locked(`conversation:${conversationId}`, async () => {
     if (await jobs.findOne({ conversationId, status: { $in: ['running', 'queued'] } })) fail(409, 'This conversation is still running.');
@@ -351,11 +353,13 @@ app.post('/api/jobs', async (req, res) => {
     const provider = conversation?.provider || req.body.provider || settings.agent.provider;
     if (!['claude', 'codex'].includes(provider)) fail(400, 'Unknown provider.');
     const id = randomUUID(); const secret = token();
-    const job = { _id: id, conversationId, provider, prompt: req.body.prompt, docId: req.body.docId || null, status: 'queued', events: [], createdAt: Date.now(), userId: res.locals.user._id, tokenHash: hashToken(secret) };
+    const modelKey = provider === 'claude' ? 'claudeModel' : 'codexModel';
+    const agentSettings = { ...settings.agent, [modelKey]: modelOverride || settings.agent[modelKey] };
+    const job = { _id: id, conversationId, provider, model: agentSettings[modelKey], modelOverride, prompt: req.body.prompt, docId: req.body.docId || null, status: 'queued', events: [], createdAt: Date.now(), userId: res.locals.user._id, tokenHash: hashToken(secret) };
     await jobs.insertOne(job);
     await conversations.updateOne({ _id: conversationId }, { $set: { provider, updatedAt: Date.now() }, $setOnInsert: { title: req.body.prompt.slice(0, 70) } }, { upsert: true });
     try {
-      await runner.start({ id, provider, prompt: job.prompt, docId: job.docId, sessionId: conversation?.sessionId, secret, settings: settings.agent });
+      await runner.start({ id, provider, prompt: job.prompt, docId: job.docId, sessionId: conversation?.sessionId, secret, settings: agentSettings });
       await jobs.updateOne({ _id: id, status: 'queued' }, { $set: { status: 'running' } });
     } catch (error: any) { await jobs.updateOne({ _id: id }, { $set: { status: 'failed', error: error.message } }); }
     res.status(202).json({ id, conversationId });
