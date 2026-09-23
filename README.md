@@ -175,13 +175,3 @@ The database image is pinned when installed. Database, private Node runtime, con
 `stop` leaves the database available for backups; stop `garnet-mongo.service` explicitly when needed for a managed database. Agent jobs are cancelled and their final events persisted during graceful shutdown. Interrupted jobs are never automatically rerun. Automatic updates can briefly interrupt editing connections and running agent jobs.
 
 A service-worker update activates once older app tabs close. Close and reopen existing tabs to load the latest UI. Keep all tabs on the same version when modifying the editor schema.
-
-For a portable backup, stop the app and use `mongodump` against the configured database, then copy the Markdown mirrors and private `install.json` file. With a managed container, use its runtime (`podman` or `docker`):
-
-```sh
-podman exec garnet-mongo mongodump --db ed --archive --gzip > backup.archive.gz
-```
-
-For native source installations, use `mongodump --uri mongodb://127.0.0.1:27018/ed --archive=backup.archive.gz --gzip`. Other host installations use their configured URI/database. Database tools may need a separate installation on native hosts. For raw file or volume backups, stop MongoDB first. Database state regenerates Markdown mirrors at startup.
-
-Health is available at `/api/health`. Settings shows the integrated executor's host account; the UI reports storage and mirror failures.
