@@ -1,3 +1,4 @@
+import { validPort } from './ports.mjs';
 import { createHash } from 'node:crypto';
 import { readFile, writeFile, rename, symlink, rm, readlink } from 'node:fs/promises';
 import path from 'node:path';
@@ -16,13 +17,14 @@ export function verifyArchive(bytes, checksums) {
 export function parseOptions(args) {
   const options = {};
   for (const arg of args) {
-    const match = /^--(root|stage|database|mongo-uri)=(.+)$/.exec(arg);
+    const match = /^--(root|stage|database|mongo-uri|port)=(.+)$/.exec(arg);
     if (!match) throw Error(`Unknown option: ${arg.split('=')[0]}`);
     options[match[1]] = match[2];
   }
   if (options.database && !['auto', 'host', 'container'].includes(options.database)) throw Error('Database must be auto, host, or container.');
   if (options['mongo-uri'] && !/^mongodb(?:\+srv)?:\/\//.test(options['mongo-uri'])) throw Error('Expected a MongoDB connection URI.');
   if (options.database === 'container' && options['mongo-uri']) throw Error('--mongo-uri cannot be combined with --database=container.');
+  if (options.port) options.port = validPort(options.port);
   return options;
 }
 export async function chooseDatabase({ existing, legacy, mode = 'auto', uri, probe }) {

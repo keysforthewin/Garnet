@@ -18,6 +18,8 @@ async function install(base, name, args = []) {
   const stage = path.join(base, `releases/.stage.${name}`);
   await mkdir(stage, { recursive: true });
   await writeFile(path.join(stage, 'VERSION'), 'v1.0.0\n');
+  await mkdir(path.join(stage, 'scripts'));
+  await writeFile(path.join(stage, 'scripts/ports.mjs'), '// Current release marker for health checks.\n');
   return spawnSync(process.execPath, ['--import', path.resolve('tests/fixtures/installer-host.mjs'), 'scripts/manage.mjs', 'install', `--root=${base}`, `--stage=${stage}`, ...args], {
     env: { ...process.env, PATH: `${path.join(base, 'bin')}:${process.env.PATH}`, GARNET_TEST_ROOT: base }, encoding: 'utf8', timeout: 15000,
   });
@@ -62,13 +64,36 @@ test('installer preserves native source data and restores the source service if 
   assert.equal(config.data, path.join(legacy, 'data'));
   assert.equal(config.database.uri, 'mongodb://127.0.0.1:27018/ed');
 });
-test('occupied app port aborts before creating services or enabling startup', async t => {
-  const base = await fixture(t, { occupied: true });
+test('occupied HTTP and database ports select available alternatives automatically', async t => {
+  const base = await fixture(t, { occupied: true, noHost: true });
   const result = await install(base, 'occupied');
-  assert.notEqual(result.status, 0);
-  assert.match(result.stderr, /Port 7777 is already occupied/);
-  assert.ok(!(await commands(base)).some(parts => parts.includes('enable-linger')));
-  await assert.rejects(readFile(path.join(base, 'install.json')), { code: 'ENOENT' });
+  assert.equal(result.status, 0, result.stderr);
+  const config = JSON.parse(await readFile(path.join(base, 'install.json'), 'utf8'));
+  assert.equal(config.port, 7778);
+  assert.equal(config.database.port, 27019);
+  assert.equal(config.database.uri, 'mongodb://127.0.0.1:27019/ed');
+  assert.match(result.stdout, /http:\/\/127.0.0.1:7778/);
+  assert.ok((await commands(base)).some(parts => parts.includes('127.0.0.1:27019:27017')));
+});
+test('explicit HTTP port is honored and cannot collide with the managed database port', async t => {
+  const base = await fixture(t, { noHost: true });
+  const result = await install(base, 'custom', ['--port=27018']);
+  assert.equal(result.status, 0, result.stderr);
+  const config = JSON.parse(await readFile(path.join(base, 'install.json'), 'utf8'));
+  assert.equal(config.port, 27018);
+  assert.equal(config.database.port, 27019);
+});
+test('installation retires old HTTPS without creating a replacement listener', async t => {
+  const base = await fixture(t);
+  const https = path.join(base, 'home/.config/systemd/user/garnet-https.service');
+  await writeFile(https, '[Service]\nExecStart=/old/caddy\n');
+  const result = await install(base, 'http-only');
+  assert.equal(result.status, 0, result.stderr);
+  await assert.rejects(readFile(https), { code: 'ENOENT' });
+  const calls = await commands(base);
+  assert.ok(calls.some(parts => parts.includes('disable') && parts.includes('garnet-https.service')));
+  assert.ok(!calls.some(parts => parts.includes('enable') && parts.includes('garnet-https.service')));
+  assert.equal('caddy' in JSON.parse(await readFile(path.join(base, 'install.json'), 'utf8')), false);
 });
 test('automatic container install pins the image and reinstallation preserves the volume and update preference', async t => {
   const base = await fixture(t, { noHost: true });

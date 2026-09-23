@@ -3,7 +3,7 @@
 set -Eeuo pipefail
 umask 077
 die() { printf 'Install failed: %s\n' "$*" >&2; exit 1; }
-[[ ${1:-} != --help ]] || { echo 'Usage: install.sh [--database=auto|host|container] [--mongo-uri=URI]'; exit 0; }
+[[ ${1:-} != --help ]] || { echo 'Usage: install.sh [--database=auto|host|container] [--mongo-uri=URI] [--port=7777]'; exit 0; }
 [[ $(uname -s) == Linux && -d /run/systemd/system ]] || die 'Linux with systemd is required.'
 [[ $EUID != 0 ]] || die 'Run this command as your regular account, without sudo. It requests sudo when needed.'
 command -v curl >/dev/null || die 'Install curl first.'

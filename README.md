@@ -8,7 +8,7 @@ Shared notes with local autosave, live collaboration, and optional Claude/Codex 
 curl -fsSL https://raw.githubusercontent.com/keysforthewin/Garnet/main/install.sh | bash
 ```
 
-Open **http://localhost:7777**. Sign in with **admin / password**, then choose a new password.
+Open the **local URL printed by the installer** (normally `http://127.0.0.1:7777`). Sign in with **admin / password**, then choose a new password. Busy ports are handled automatically.
 
 The installer handles dependencies, starts the app in the background, enables startup after reboot—even before login—and checks daily for stable app releases. It uses your running MongoDB server when available; otherwise it sets up a database container. It may request your sudo password during setup.
 
@@ -62,17 +62,98 @@ These captures use fictional demo notes and real agent runs. Agent waiting is sh
 
 </details>
 
-## Cloudflare Tunnel (optional)
+## Cloudflare Tunnel: public HTTPS
 
-For access from other devices without opening inbound ports:
+Garnet serves **HTTP only** on loopback. Cloudflare supplies the public HTTPS certificate and encrypted tunnel. Run `cloudflared` directly on the **same machine** as Garnet; the only optional application container is MongoDB.
 
-1. Install locally and change the initial administrator password.
-2. Add your domain to Cloudflare. In the Cloudflare dashboard, go to **Networking → Tunnels**, create a tunnel, and choose the Cloudflared connector.
-3. Follow the dashboard's Linux connector installation command, including its service installation step so the tunnel starts after reboot. Keep the tunnel token private.
-4. Add a published application route for your hostname, such as `notes.example.com`, pointing to **HTTP → 127.0.0.1:7777**.
-5. Open `https://notes.example.com` and sign in.
+### 1. Find your local app address
 
-Cloudflare provides public HTTPS. Caddy and a local CA certificate are unnecessary for this route. Existing tunnels can add the same application route instead of creating another tunnel. See [Cloudflare's setup guide](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/get-started/create-remote-tunnel/).
+Install Garnet, change the initial password, then run:
+
+```sh
+~/.local/bin/garnet url
+```
+
+Copy the printed address, for example `http://127.0.0.1:7778`. Use the actual port it prints throughout the tunnel setup. Check that the app is healthy:
+
+```sh
+curl "$(~/.local/bin/garnet url)/api/health"
+```
+
+The response should be `{"ok":true}`.
+
+### 2. Create a tunnel, or select your existing one
+
+You need a Cloudflare account and a domain managed by Cloudflare.
+
+In the [Cloudflare dashboard](https://dash.cloudflare.com/), open **Networking → Tunnels**. For a new tunnel, choose **Create Tunnel**, name it, then select your Linux distribution and CPU architecture under **Setup Environment**. Run the dashboard's **Install and Run** commands on the Garnet machine. These install the native `cloudflared` connector and its background service. The service command has this form:
+
+```sh
+sudo cloudflared service install <TUNNEL_TOKEN>
+```
+
+Use the private token from your dashboard. Wait for the tunnel to show **Healthy**. If a dashboard-managed tunnel is already running on this machine, select it and continue below; skip installing another connector. These steps follow [Cloudflare's current setup guide](https://developers.cloudflare.com/tunnel/get-started/).
+
+### 3. Connect a public hostname to Garnet
+
+In your tunnel, open **Routes → Add route → Published application**:
+
+| Field | Value |
+| --- | --- |
+| Hostname | Your subdomain and domain, for example `notes.example.com` |
+| Service URL | The exact **HTTP** address from `garnet url`, for example `http://127.0.0.1:7778` |
+
+If your dashboard separates the service fields, choose **HTTP** as the type and enter `127.0.0.1:7778` as the address. Save the route. Open **https://notes.example.com** in your browser.
+
+HTTPS is now handled outside Garnet. The browser uses HTTPS to Cloudflare, and the connector forwards to Garnet over local HTTP. You do not need an application certificate, HTTPS port, SSL setting, or router port forwarding. Publish only the app's HTTP address; MongoDB stays private.
+
+### Existing tunnel configured with a YAML file
+
+For a locally managed tunnel, add this entry to its existing `ingress` list, **before the final catch-all rule**, using your actual hostname and app port:
+
+```yaml
+ingress:
+  - hostname: notes.example.com
+    service: http://127.0.0.1:7778
+  # Keep any other application routes here.
+  - service: http_status:404
+```
+
+Keep the existing tunnel ID, credentials file, and other routes. Add the hostname's DNS route with `cloudflared tunnel route dns <TUNNEL_NAME_OR_ID> notes.example.com`, then restart the service running that configuration (usually `sudo systemctl restart cloudflared`). See [Cloudflare's configuration reference](https://developers.cloudflare.com/tunnel/features/locally-managed-tunnels/configuration-file/) and [tunnel routing](https://developers.cloudflare.com/tunnel/concepts/routing/).
+
+### If the public URL does not work
+
+First check the local health command above. Then check that the tunnel is **Healthy**, its hostname matches, and its Service URL uses **HTTP** with the port currently shown by `garnet url`. A **502** usually means the connector cannot reach that local address. After changing the app port, update this one route; your public hostname can stay the same.
+
+Use a named tunnel for normal use. Cloudflare's temporary Quick Tunnels do not support server-sent events, which Garnet uses for live updates. See [Cloudflare's Quick Tunnel limitations](https://developers.cloudflare.com/tunnel/get-started/#quick-tunnels-development).
+
+## Ports and choosing a different port
+
+The app needs **at most two local TCP listening ports**:
+
+| Service | Preferred port | Behavior |
+| --- | --- | --- |
+| App, collaboration, and agents | `127.0.0.1:7777` | One HTTP listener; uses the next available port if busy |
+| Managed MongoDB | `127.0.0.1:27018` | Uses the next available port at installation if busy; existing host databases retain their own address |
+
+There is no HTTPS listener, SSL container, or separate agent-runner port. Agent document tools use a local Unix socket. Cloudflare's connector is external to the app and needs its own outbound network connectivity.
+
+The installer prints the selected address. `~/.local/bin/garnet url` prints it again; `~/.local/bin/garnet status` also shows the database address. Ports are saved across restarts. If another process takes the app port before startup, Garnet binds the next available port, saves it, and reports it in the logs and `garnet url`.
+
+To prefer a different HTTP port during installation:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/keysforthewin/Garnet/main/install.sh | bash -s -- --port=8888
+```
+
+To change it after installation:
+
+```sh
+~/.local/bin/garnet port 8888
+~/.local/bin/garnet url
+```
+
+These commands also fall back automatically if the requested port is busy. Use a port between 1024 and 65535, then point your tunnel route to the URL printed by the command. For a source checkout, use `./garnet install --port=8888`; for foreground use, `./garnet run --port 8888`.
 
 ## Prerequisites and installation choices
 
@@ -97,7 +178,7 @@ curl -fsSL https://raw.githubusercontent.com/keysforthewin/Garnet/main/install.s
 curl -fsSL https://raw.githubusercontent.com/keysforthewin/Garnet/main/install.sh | bash -s -- --database=host --mongo-uri='mongodb://127.0.0.1:27017/garnet'
 ```
 
-Connection settings are stored in a private file, not in service units. Reinstalling preserves the selected database. Switching backends requires an explicit data migration. The managed container publishes only `127.0.0.1:27018` and keeps data in the `garnet-mongo` volume. App updates never replace that volume or upgrade MongoDB's major version.
+Connection settings are stored in a private file, not in service units. Reinstalling preserves the selected database. Switching backends requires an explicit data migration. The managed container publishes only on loopback, using its selected port (normally `127.0.0.1:27018`) and keeps data in the `garnet-mongo` volume. App updates never replace that volume or upgrade MongoDB's major version.
 
 ### Source installation
 
@@ -109,7 +190,7 @@ For development, install Node 22.12+ and MongoDB 8+, then run from a clone:
 
 This uses the existing host MongoDB binary and source-checkout services. It does not enable packaged automatic updates. To start these services before login, run `loginctl enable-linger "$USER"` once. Source updates use `./garnet update` after pulling changes.
 
-For foreground use, start MongoDB and run `./garnet run`. Server options are `--host` (default `127.0.0.1`), `--port` (7777), `--mongo` (`mongodb://127.0.0.1:27018/ed`), `--storage`, `--runtime`, `--public`, and `--caddy-data`. Managed installations pass the database connection through `GARNET_MONGO_URI`. `./ed` remains an alias for `./garnet`.
+For foreground use, start MongoDB and run `./garnet run`. Server options are `--host` (default `127.0.0.1`), `--port` (7777), `--mongo` (`mongodb://127.0.0.1:27018/ed`), `--storage`, `--runtime`, and `--public`. Managed installations pass the database connection through `GARNET_MONGO_URI`. `./ed` remains an alias for `./garnet`.
 
 Existing installations should read [host migration](docs/host-migration.md) before changing database backends. The packaged installer can adopt the standard native source installation while retaining its data paths; custom service configurations require manual migration.
 
@@ -117,14 +198,9 @@ Existing installations should read [host migration](docs/host-migration.md) befo
 
 Garnet runs the web server and agent executor in **one Node process**, managed by the `garnet.service` user service. Claude and Codex run as short-lived subprocesses for model discovery and agent jobs, using your existing host CLI logins. There is no separate runner to start. Settings → Agents controls executable paths, separate Claude/Codex model choices, working directory, and timeout. Model lists come from the installed CLIs at startup and refresh when an executable or working directory changes. Each selector also supports the CLI default and a custom model. Discovery only initializes the CLI and requests its catalog; it sends no prompt. Codex uses its [model/list interface](https://learn.chatgpt.com/docs/app-server#list-models-modellist); Claude returns models during its CLI initialization handshake. In the Ask your agent panel, the Model selector overrides the configured default for your next message and remembers that choice when you return to the conversation. Select New conversation to start a fresh chat. Starting context lists the current document once, followed by the library and other documents. Each signed-in user can invoke agents with the host account's full access.
 
-## Private-network HTTPS and offline use
+## Offline use
 
-1. Open Settings → Storage & HTTPS on localhost.
-2. Set a hostname or LAN/VPN IP that resolves to this host, then save.
-3. Download the local CA certificate and install it as a trusted certificate on each device.
-4. Open `https://YOUR-HOST:8443`. Caddy reloads its generated configuration automatically.
-
-The HTTP bootstrap port is bound only to host loopback. Caddy's HTTPS port is available to the private network. Changing the HTTPS address changes the browser origin, so the new origin needs its own login and background cache download. Local certificate installation is an operating-system/browser operation and cannot be automated by a web page.
+Use the local loopback URL or your HTTPS Cloudflare hostname for browser offline support. Changing the hostname or local port creates a different browser origin, with its own login and offline cache.
 
 The whole text library downloads in the background. After the application has loaded and caching finishes, you can reopen it offline, edit existing documents, and create new ones. Browser storage quotas and eviction policies still apply; use “Keep offline storage” and periodic exports. Agent jobs and shared settings require a server connection. Offline AI prompts remain drafts.
 
@@ -150,8 +226,7 @@ Packaged installations live in `~/.local/share/garnet/`:
 | `current` / `releases/` | Active and retained application releases |
 | `install.json` | Private connection settings, runtime paths, and update preference |
 | `data/documents/` | Markdown mirrors |
-| `data/runtime/` | Document-tool socket and generated Caddy configuration |
-| `data/caddy-host/` | Private HTTPS certificates and CA |
+| `data/runtime/` | Document-tool socket and actual HTTP address in `listen.json` |
 | Container volume `garnet-mongo` | Database for managed container installations |
 
 A reused host MongoDB keeps its own storage. Adopted source installations keep their original `data/` paths. Source builds live in `build/`, with native MongoDB data in `data/mongo-host/`.
@@ -165,6 +240,7 @@ Direct edits to mirror files are **not imported**. Agents use the Garnet library
 The installer adds `~/.local/bin/garnet`. If that directory is on your PATH, you can shorten these commands to `garnet`:
 
 ```sh
+~/.local/bin/garnet url
 ~/.local/bin/garnet status
 ~/.local/bin/garnet logs
 ~/.local/bin/garnet stop
@@ -175,6 +251,8 @@ The installer adds `~/.local/bin/garnet`. If that directory is on your PATH, you
 ~/.local/bin/garnet autoupdate on
 ```
 
+Upgrading an older installation disables its built-in HTTPS service. Use a Cloudflare HTTP route to the address from `garnet url` for public access. Existing notes and database storage remain intact.
+
 Automatic updates check daily, with up to an hour of randomized delay, and catch up after the machine has been off. Only published stable releases are installed. Downloads and dependencies are prepared before restarting the app. A failed health check restores the previous app release; this is an app rollback, not a database rollback. Update logs are available with `journalctl --user -u garnet-update.service`.
 
 The database image is pinned when installed. Database, private Node runtime, container runtime, and operating-system upgrades remain separate maintenance tasks. Host Node installations follow their existing maintenance process.
@@ -183,13 +261,13 @@ The database image is pinned when installed. Database, private Node runtime, con
 
 A service-worker update activates once older app tabs close. Close and reopen existing tabs to load the latest UI. Keep all tabs on the same version when modifying the editor schema.
 
-For a portable backup, stop the app and use `mongodump` against the configured database, then copy the Markdown mirrors, Caddy state, and private `install.json` file. With a managed container, use its runtime (`podman` or `docker`):
+For a portable backup, stop the app and use `mongodump` against the configured database, then copy the Markdown mirrors and private `install.json` file. With a managed container, use its runtime (`podman` or `docker`):
 
 ```sh
 podman exec garnet-mongo mongodump --db ed --archive --gzip > backup.archive.gz
 ```
 
-For native source installations, use `mongodump --uri mongodb://127.0.0.1:27018/ed --archive=backup.archive.gz --gzip`. Other host installations use their configured URI/database. Database tools may need a separate installation on native hosts. For raw file or volume backups, stop MongoDB first. Keep the Caddy CA to preserve device trust. Database state regenerates Markdown mirrors at startup.
+For native source installations, use `mongodump --uri mongodb://127.0.0.1:27018/ed --archive=backup.archive.gz --gzip`. Other host installations use their configured URI/database. Database tools may need a separate installation on native hosts. For raw file or volume backups, stop MongoDB first. Database state regenerates Markdown mirrors at startup.
 
 Health is available at `/api/health`. Settings shows the integrated executor's host account; the UI reports storage and mirror failures.
 

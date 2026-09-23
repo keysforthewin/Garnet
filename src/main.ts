@@ -1,6 +1,8 @@
 import './style.css';
 import { api, setCsrf, escape } from './api';
 import type { User } from '../shared/types';
+// Cache the app shell independently of document synchronization.
+if ('serviceWorker' in navigator && window.isSecureContext) navigator.serviceWorker.register('/sw.js').catch(() => {});
 const root = document.querySelector<HTMLDivElement>('#app')!;
 async function enter(user: User) {
   localStorage.setItem('ed-user', JSON.stringify(user));
@@ -24,4 +26,3 @@ catch (error: any) {
   if (!error.status && cached) { try { await enter(JSON.parse(cached)); } catch { loginScreen('Local storage is unavailable. Reconnect to sign in.'); } }
   else loginScreen();
 }
-if ('serviceWorker' in navigator && window.isSecureContext) navigator.serviceWorker.register('/sw.js').catch(() => {});

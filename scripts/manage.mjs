@@ -1,7 +1,8 @@
 import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdir, readFile, writeFile, rename, rm, readdir, readlink, chmod, mkdtemp } from 'node:fs/promises';
 import { existsSync, accessSync, constants } from 'node:fs';
-import { createServer } from 'node:net';
+import { availablePort, appPort, validPort } from './ports.mjs';
+import { retireHttps } from './retire-https.mjs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -34,17 +35,15 @@ async function probe(uri) {
   } catch { throw Error('Cannot access a compatible MongoDB database. Check its address, version and credentials.'); }
   finally { await client.close(); }
 }
-async function freePort(port) {
-  await new Promise((resolve, reject) => {
-    const server = createServer();
-    server.once('error', () => reject(Error(`Port ${port} is already occupied. Nothing using that port was stopped.`)));
-    server.listen(port, '127.0.0.1', () => server.close(resolve));
-  });
-}
-async function healthy() {
+async function healthy(config, base) {
   for (let i = 0; i < 90; i++) {
     const active = succeeds('systemctl', ['--user', 'is-active', '--quiet', 'garnet.service']);
-    if (active && await fetch('http://127.0.0.1:7777/api/health', { signal: AbortSignal.timeout(2000) }).then(r => r.ok).catch(() => false)) return;
+    const listener = JSON.parse(await readFile(path.join(config.data, 'runtime/listen.json'), 'utf8').catch(() => 'null'));
+    const pid = Number(output('systemctl', ['--user', 'show', 'garnet.service', '--property=MainPID', '--value']));
+    // Older releases did not write listen.json; retain rollback compatibility.
+    const oldRelease = base && !existsSync(path.join(base, 'current/scripts/ports.mjs'));
+    const port = listener?.pid === pid ? validPort(listener.port) : oldRelease ? 7777 : null;
+    if (active && pid > 0 && port && await fetch(`http://127.0.0.1:${port}/api/health`, { signal: AbortSignal.timeout(2000) }).then(r => r.ok).catch(() => false)) return;
     await pause(1000);
   }
   throw Error('App did not become healthy. Run garnet logs.');
@@ -67,9 +66,20 @@ async function installPodman() {
   if (!succeeds('podman', ['info'])) throw Error('Podman rootless setup failed. Check user namespaces and subordinate UID/GID support.');
   return which('podman');
 }
-async function containerDatabase(database) {
-  if (database.engine) return database; // Existing installation: do not recreate or replace storage.
-  await freePort(27018);
+async function containerDatabase(database, httpPort) {
+  if (database.engine) {
+    const info = JSON.parse(output(database.engine, ['container', 'inspect', database.container]))[0];
+    if (info.State.Running) return database;
+    const previousPort = Number(new URL(database.uri).port);
+    const port = await availablePort(previousPort, [httpPort]);
+    if (port === previousPort) return database;
+    if (info.Config.Labels?.app !== 'garnet' || !info.Mounts?.some(mount => mount.Name === database.volume && mount.Destination === '/data/db')) throw Error('Cannot change the port of an unrecognized database container. Its storage was preserved.');
+    // Recreate only our stopped container, retaining its named volume and image.
+    run(database.engine, ['rm', database.container]);
+    run(database.engine, ['create', '--name', database.container, '--label', 'app=garnet', '--publish', `127.0.0.1:${port}:27017`, '--volume', `${database.volume}:/data/db`, database.image, '--bind_ip_all']);
+    return { ...database, port, uri: `mongodb://127.0.0.1:${port}/ed` };
+  }
+  const port = await availablePort(27018, [httpPort]);
   if (process.arch === 'x64' && !/\bavx\b/.test(await readFile('/proc/cpuinfo', 'utf8'))) throw Error('MongoDB 8 requires an x86-64 CPU with AVX. Use --mongo-uri to connect to a compatible server.');
   const engine = succeeds('podman', ['info']) ? which('podman') : succeeds('docker', ['info']) ? which('docker') : await installPodman();
   const name = 'garnet-mongo';
@@ -84,9 +94,9 @@ async function containerDatabase(database) {
     run('sudo', ['systemctl', 'enable', '--now', 'docker.service']);
   }
   run(engine, ['volume', 'create', '--label', 'app=garnet', name]);
-  try { run(engine, ['create', '--name', name, '--label', 'app=garnet', '--publish', '127.0.0.1:27018:27017', '--volume', `${name}:/data/db`, digest, '--bind_ip_all']); }
+  try { run(engine, ['create', '--name', name, '--label', 'app=garnet', '--publish', `127.0.0.1:${port}:27017`, '--volume', `${name}:/data/db`, digest, '--bind_ip_all']); }
   catch (error) { run(engine, ['volume', 'rm', name]); throw error; } // Newly created, never started: no user data exists yet.
-  return { ...database, engine, container: name, volume: name, image: digest };
+  return { ...database, uri: `mongodb://127.0.0.1:${port}/ed`, port, engine, container: name, volume: name, image: digest };
 }
 function service(description, command, { extra = '', working, restart = 'on-failure', tail = '' } = {}) {
   return `[Unit]\nDescription=${description}\nAfter=network.target\nStartLimitIntervalSec=0\n${extra}\n[Service]\nType=simple\n${working ? `WorkingDirectory=${working.replaceAll('%', '%%')}\n` : ''}ExecStart=${command.map(qe).join(' ')}\nRestart=${restart}\nRestartSec=5\nKillMode=mixed\nTimeoutStopSec=60\n${tail}\n[Install]\nWantedBy=default.target\n`;
@@ -97,11 +107,13 @@ async function legacyInstall() {
   if (!working) return null;
   // Only automatically adopt the known native installer shape.
   const command = output('systemctl', ['--user', 'show', 'garnet.service', '--property=ExecStart', '--value']);
-  if (!command.includes(path.join(working, 'build/server.mjs')) || /\s--[a-z]/.test(command)) {
+  const sourceConfig = JSON.parse(await readFile(path.join(working, 'data/runtime/source-install.json'), 'utf8').catch(() => '{}'));
+  const knownSource = command.includes(path.join(working, 'scripts/source-service.mjs')) && sourceConfig.mongoPort;
+  if (!knownSource && (!command.includes(path.join(working, 'build/server.mjs')) || /\s--[a-z]/.test(command))) {
     throw Error('Existing custom Garnet service detected. Follow docs/host-migration.md before replacing its configuration.');
   }
   if (!existsSync(path.join(working, 'data/mongo-host'))) throw Error('Existing Garnet service has unfamiliar storage. Preserve it and migrate explicitly.');
-  return { data: path.join(working, 'data'), dataParent: working, database: { kind: 'host', uri: 'mongodb://127.0.0.1:27018/ed', service: 'garnet-mongo.service' } };
+  return { data: path.join(working, 'data'), dataParent: working, port: await appPort({ data: path.join(working, 'data'), port: sourceConfig.port }), database: { kind: 'host', uri: `mongodb://127.0.0.1:${sourceConfig.mongoPort || 27018}/ed`, service: 'garnet-mongo.service' } };
 }
 async function writeServices(base, config) {
   await mkdir(units, { recursive: true });
@@ -119,14 +131,11 @@ async function writeServices(base, config) {
   const updateCommand = [which('flock'), '-n', '-E', '75', path.join(base, 'install.lock'), config.node, path.join(base, 'current/scripts/manage.mjs'), 'update-locked', `--root=${base}`];
   await writeFile(path.join(units, 'garnet-update.service'), `[Unit]\nDescription=Update notes from stable releases\n\n[Service]\nType=oneshot\nExecStart=${updateCommand.map(qe).join(' ')}\nEnvironment=${q(`PATH=${config.path}`)}\nTimeoutStartSec=30min\nSuccessExitStatus=75\n`);
   await writeFile(path.join(units, 'garnet-update.timer'), '[Unit]\nDescription=Daily notes updates\n\n[Timer]\nOnCalendar=daily\nRandomizedDelaySec=1h\nPersistent=true\n\n[Install]\nWantedBy=timers.target\n');
-  if (config.caddy) await writeFile(path.join(units, 'garnet-https.service'), service('Notes private HTTPS', [config.caddy, 'run', '--config', path.join(config.data, 'runtime/Caddyfile'), '--adapter', 'caddyfile', '--watch'], {
-    working: config.dataParent, extra: 'Wants=garnet.service\nAfter=garnet.service\nPartOf=garnet.service',
-  }));
   ctl('daemon-reload');
   if (ownsDatabase) ctl('enable', '--now', 'garnet-mongo.service');
 }
 async function snapshotServices() {
-  const names = ['garnet.service', 'garnet-https.service', 'garnet-update.service', 'garnet-update.timer'];
+  const names = ['garnet.service', 'garnet-update.service', 'garnet-update.timer'];
   const snapshots = await Promise.all(names.map(async name => ({ name,
     content: await readFile(path.join(units, name)).catch(error => { if (error.code === 'ENOENT') return null; throw error; }),
     active: succeeds('systemctl', ['--user', 'is-active', '--quiet', name]),
@@ -156,17 +165,21 @@ async function install(base, options) {
   try { config = await readConfig(base); } catch (error) { if (error.code !== 'ENOENT') throw error; }
   const previousConfig = config;
   const old = config ? null : await legacyInstall();
-  if (!config && !old) await freePort(7777);
+  const port = options.port || (config ? await appPort(config) : old?.port) || await availablePort(7777);
+  const selectedPort = !config && !old && options.port ? await availablePort(port) : port;
   const data = config?.data || old?.data || path.join(base, 'data');
-  for (const name of ['documents', 'runtime', 'caddy-host']) await mkdir(path.join(data, name), { recursive: true });
+  for (const name of ['documents', 'runtime']) await mkdir(path.join(data, name), { recursive: true });
   let database = await chooseDatabase({ existing: config?.database, legacy: old?.database, mode: options.database, uri: options['mongo-uri'], probe });
   // Configure lingering before claiming unattended boot support.
   const user = os.userInfo().username;
   if (!succeeds('loginctl', ['enable-linger', user])) run('sudo', ['loginctl', 'enable-linger', user]);
   if (output('loginctl', ['show-user', user, '--property=Linger', '--value']) !== 'yes') throw Error('Could not enable user services at boot.');
-  if (database.kind === 'container') database = await containerDatabase(database);
-  config = { ...config, version: 1, node: process.execPath, path: process.env.PATH, data, dataParent: config?.dataParent || old?.dataParent || base, database,
-    caddy: config?.caddy || which('caddy') || (existsSync(path.join(os.homedir(), '.local/lib/garnet/caddy')) ? path.join(os.homedir(), '.local/lib/garnet/caddy') : ''), autoUpdate: config?.autoUpdate ?? true };
+  if (database.kind === 'container') database = await containerDatabase(database, selectedPort);
+  config = { ...config, version: 1, port: selectedPort, node: process.execPath, path: process.env.PATH, data, dataParent: config?.dataParent || old?.dataParent || base, database,
+    autoUpdate: config?.autoUpdate ?? true };
+  delete config.caddy;
+  await retireHttps();
+  if (options.port) await rm(path.join(data, 'runtime/listen.json'), { force: true });
   await atomicJSON(path.join(base, 'install.json'), config);
   const restoreServices = await snapshotServices();
   const previousRelease = await readlink(path.join(base, 'current')).catch(() => null);
@@ -177,9 +190,8 @@ async function install(base, options) {
     if (!databaseReady) throw Error('Database did not become ready. Inspect its service logs; the selected database has been preserved.');
     const target = path.join(base, 'releases', `${version}-${Date.now()}`);
     await rename(stage, target);
-    await activateRelease(base, target, { restart: () => ctl('restart', 'garnet.service'), healthy });
+    await activateRelease(base, target, { restart: () => ctl('restart', 'garnet.service'), healthy: () => healthy(config, base) });
     ctl('enable', 'garnet.service');
-    if (config.caddy) ctl('enable', '--now', 'garnet-https.service');
     ctl(config.autoUpdate ? 'enable' : 'disable', '--now', 'garnet-update.timer');
   } catch (error) {
     if (previousConfig) await atomicJSON(path.join(base, 'install.json'), previousConfig);
@@ -195,7 +207,7 @@ async function install(base, options) {
   const sh = text => `'${text.replaceAll("'", "'\\''")}'`;
   await writeFile(launcher, `#!/bin/sh\nexec ${sh(config.node)} ${sh(path.join(base, 'current/scripts/manage.mjs'))} "$@" --root=${sh(base)}\n`, { mode: 0o755 });
   await chmod(launcher, 0o755);
-  console.log(`Installed ${version}. Open http://localhost:7777\nFirst login: admin / password; change the password when prompted.\nStarts at boot. Daily updates: ${config.autoUpdate ? 'on' : 'off'}.\nCommands: ${launcher} status | logs | update`);
+  console.log(`Installed ${version}. Open http://127.0.0.1:${await appPort(config)}\nMongoDB: ${new URL(config.database.uri).host}\nFirst login: admin / password; change the password when prompted.\nStarts at boot. Daily updates: ${config.autoUpdate ? 'on' : 'off'}.\nCommands: ${launcher} url | status | logs | update`);
 }
 async function download(url) {
   const response = await fetch(url, { signal: AbortSignal.timeout(300000), headers: { 'User-Agent': 'Garnet-updater' } });
@@ -205,6 +217,8 @@ async function download(url) {
 async function update(base) {
   const config = await readConfig(base);
   process.env.PATH = config.path;
+  await retireHttps();
+  if ('caddy' in config) { delete config.caddy; await atomicJSON(path.join(base, 'install.json'), config); }
   const release = JSON.parse((await download(`https://api.github.com/repos/${repository}/releases/latest`)).toString());
   const version = stableRelease(release);
   const current = await readlink(path.join(base, 'current'));
@@ -235,8 +249,7 @@ async function update(base) {
     run(config.node, ['--check', path.join(temporary, 'build/server.mjs')]);
     target = path.join(base, 'releases', `${version}-${Date.now()}`);
     await rename(temporary, target);
-    const previous = await activateRelease(base, target, { restart: () => ctl('restart', 'garnet.service'), healthy });
-    if (config.caddy) ctl('restart', 'garnet-https.service');
+    const previous = await activateRelease(base, target, { restart: () => ctl('restart', 'garnet.service'), healthy: () => healthy(config, base) });
     for (const name of await readdir(path.join(base, 'releases'))) {
       const entry = path.join(base, 'releases', name);
       if (entry !== target && entry !== previous && /^v\d+\.\d+\.\d+-\d+$/.test(name)) await rm(entry, { recursive: true, force: true });
@@ -256,12 +269,22 @@ async function main() {
     return run('flock', ['-n', '-E', '75', path.join(base, 'install.lock'), config.node, fileURLToPath(import.meta.url), 'update-locked', `--root=${base}`]);
   }
   if (command === 'logs') return run('journalctl', ['--user', '-u', 'garnet.service', '-n', '80', '-f']);
-  if (command === 'status') { ctl('status', 'garnet.service', '--no-pager'); return ctl('list-timers', 'garnet-update.timer', '--no-pager'); }
-  if (command === 'start' || command === 'stop') {
+  if (command === 'url') { console.log(`http://127.0.0.1:${await appPort(await readConfig(base))}`); return; }
+  if (command === 'port') {
     const config = await readConfig(base);
-    if (command === 'stop' && config.caddy) ctl('stop', 'garnet-https.service');
+    config.port = validPort(positional[0]);
+    await atomicJSON(path.join(base, 'install.json'), config);
+    await rm(path.join(config.data, 'runtime/listen.json'), { force: true });
+    ctl('restart', 'garnet.service'); await healthy(config, base);
+    console.log(`http://127.0.0.1:${await appPort(config)} — update your tunnel route to this HTTP address.`); return;
+  }
+  if (command === 'status') {
+    const config = await readConfig(base);
+    console.log(`App: http://127.0.0.1:${await appPort(config)}\nMongoDB: ${new URL(config.database.uri).host}`);
+    ctl('status', 'garnet.service', '--no-pager'); return ctl('list-timers', 'garnet-update.timer', '--no-pager');
+  }
+  if (command === 'start' || command === 'stop') {
     ctl(command, 'garnet.service');
-    if (command === 'start' && config.caddy) ctl('start', 'garnet-https.service');
     return;
   }
   if (command === 'autoupdate') {
@@ -272,7 +295,7 @@ async function main() {
     ctl(action === 'on' ? 'enable' : 'disable', '--now', 'garnet-update.timer');
     config.autoUpdate = action === 'on'; await atomicJSON(path.join(base, 'install.json'), config); return;
   }
-  console.log('Usage: garnet {start|stop|status|logs|update|autoupdate on|off|status}');
+  console.log('Usage: garnet {start|stop|url|port NUMBER|status|logs|update|autoupdate on|off|status}');
 }
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   main().catch(error => { console.error(error.message); process.exitCode = 1; });

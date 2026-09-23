@@ -10,7 +10,7 @@ const temporary = await mkdtemp(path.join(os.tmpdir(), 'garnet-release-'));
 try {
   await cp('build', path.join(temporary, 'build'), { recursive: true });
   await mkdir(path.join(temporary, 'scripts'));
-  for (const file of ['manage.mjs', 'service.mjs', 'install-lib.mjs']) await cp(`scripts/${file}`, path.join(temporary, 'scripts', file));
+  for (const file of ['manage.mjs', 'service.mjs', 'install-lib.mjs', 'ports.mjs', 'retire-https.mjs']) await cp(`scripts/${file}`, path.join(temporary, 'scripts', file));
   for (const file of ['package.json', 'package-lock.json', 'LICENSE']) await cp(file, path.join(temporary, file));
   await writeFile(path.join(temporary, 'VERSION'), `${version}\n`);
   await mkdir('build/release', { recursive: true });

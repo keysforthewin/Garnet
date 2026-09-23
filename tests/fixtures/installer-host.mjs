@@ -4,7 +4,7 @@ import os from 'node:os';
 import net from 'node:net';
 import { EventEmitter } from 'node:events';
 import { syncBuiltinESMExports } from 'node:module';
-import { readFileSync, appendFileSync } from 'node:fs';
+import { readFileSync, appendFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { MongoClient } from 'mongodb';
 
@@ -34,21 +34,30 @@ childProcess.execFileSync = (command, args) => {
     if (args.includes('show')) {
       if (args.includes('--property=WorkingDirectory')) return scenario.legacy || '';
       if (args.includes('--property=ExecStart')) return `argv[]=/usr/bin/node ${scenario.legacy}/build/server.mjs ;`;
+      if (args.includes('--property=MainPID')) return '4242';
     }
     if (args.includes('enable') && args.includes('garnet-mongo.service')) databaseStarted = true;
     if (scenario.failRestart && !restartFailed && args.includes('restart') && args.includes('garnet.service')) { restartFailed = true; throw Error('Simulated start failure'); }
+    if (args.includes('restart') && args.includes('garnet.service')) {
+      const config = JSON.parse(readFileSync(path.join(base, 'install.json'), 'utf8'));
+      writeFileSync(path.join(config.data, 'runtime/listen.json'), JSON.stringify({ port: config.port || 7777, pid: 4242 }));
+    }
     return '';
   }
   if (name === 'loginctl') return 'yes';
   if (name === 'docker' || name === 'podman') {
+    if (args[0] === 'container' && args[1] === 'inspect') return JSON.stringify([{ State: { Running: !scenario.stoppedContainer }, Config: { Labels: { app: 'garnet' } }, Mounts: [{ Name: 'garnet-mongo', Destination: '/data/db' }] }]);
     if (args[0] === 'image' && args[1] === 'inspect') return JSON.stringify([{ RepoDigests: [`docker.io/library/mongo@sha256:${'a'.repeat(64)}`] }]);
-    if (['pull', 'volume', 'create'].includes(args[0])) return '';
+    if (['pull', 'volume', 'create', 'rm'].includes(args[0])) return '';
   }
   throw Error(`Simulator refused command: ${name}`);
 };
 net.createServer = () => {
   const server = new EventEmitter();
-  server.listen = (_port, _host, callback) => { if (scenario.occupied) server.emit('error', Error('occupied')); else callback(); };
+  server.listen = (port, _host) => {
+    if ((scenario.occupied && [7777, 27018].includes(port)) || scenario.occupiedPorts?.includes(port)) server.emit('error', Object.assign(Error('occupied'), { code: 'EADDRINUSE' }));
+    else server.emit('listening');
+  };
   server.close = callback => callback();
   return server;
 };

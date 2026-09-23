@@ -1,0 +1,10 @@
+import { readFile } from 'node:fs/promises';
+import path from 'node:path';
+import { appPort } from './ports.mjs';
+import { retireHttps } from './retire-https.mjs';
+const data = path.resolve('data');
+const config = JSON.parse(await readFile(path.join(data, 'runtime/source-install.json'), 'utf8'));
+await retireHttps();
+process.env.GARNET_MONGO_URI = `mongodb://127.0.0.1:${config.mongoPort}/ed`;
+process.argv = [process.execPath, path.resolve('build/server.mjs'), '--port', String(await appPort({ data, port: config.port }))];
+await import('../build/server.mjs');

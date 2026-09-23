@@ -58,6 +58,8 @@ test.describe.serial('shared editor', () => {
     await writer.getByLabel('Current password', { exact: true }).fill(password); await writer.getByLabel('New password', { exact: true }).fill(`${password}-changed`); await writer.getByLabel('Confirm new password').fill(`${password}-changed`); await writer.getByRole('button', { name: 'Change password', exact: true }).click(); await expect(writer.locator('#menu-button')).toBeVisible();
     expect((await request(writer, '/users', 'POST', { username: 'forbidden', password })).status).toBe(403);
     expect((await request(writer, '/settings')).status).toBe(200);
+    expect((await request(writer, '/settings')).data).not.toHaveProperty('httpsAddress');
+    expect((await request(writer, '/certificate')).status).toBe(404);
     await page.locator('#menu-button').click(); await page.locator('.doc-row').filter({ hasText: 'Shared field notes' }).click();
     const download = page.waitForEvent('download'); await page.locator('#menu-button').click(); await page.locator('#export-button').click(); const exported = await download; expect(exported.suggestedFilename()).toMatch(/Shared-field-notes--.*\.md/); expect(await readFile((await exported.path())!, 'utf8')).toContain('Offline addition.');
     await page.locator('#menu-button').click(); await page.getByRole('button', { name: 'Move to trash' }).click(); await expect(page.getByRole('heading', { name: 'Room to think.' })).toBeVisible();

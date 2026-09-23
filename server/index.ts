@@ -1,3 +1,4 @@
+import { listenAvailable } from '../scripts/ports.mjs';
 import express from 'express';
 import compression from 'compression';
 import { createServer } from 'node:http';
@@ -41,6 +42,8 @@ await users.updateOne({ _id: 'bootstrap-admin' }, { $setOnInsert: { username: 'a
 await settingsCollection.updateOne({ _id: 'app' }, { $setOnInsert: { value: defaults } }, { upsert: true });
 let settings: Settings = (await settingsCollection.findOne({ _id: 'app' }))!.value;
 settings.agent = normalizeAgentSettings(settings.agent);
+// Discard the retired setting in memory without rewriting users’ databases at startup.
+delete (settings as Settings & { httpsAddress?: string }).httpsAddress;
 const modelCatalog = createModelCatalog();
 function refreshModels() { for (const provider of ['claude', 'codex'] as const) void modelCatalog.get(provider, settings.agent[`${provider}Path`], settings.agent.cwd); }
 refreshModels();
@@ -301,39 +304,11 @@ app.put('/api/settings', async (req, res) => {
   if (!Number.isInteger(next.revisionLimit) || next.revisionLimit < 1 || next.revisionLimit > 1000 || !Number.isInteger(next.trashDays) || next.trashDays < 1 || next.trashDays > 3650) fail(400, 'Invalid retention setting.');
   if (!next.agent || !['claude', 'codex'].includes(next.agent.provider) || !Number.isInteger(next.agent.timeoutMinutes) || next.agent.timeoutMinutes < 1 || next.agent.timeoutMinutes > 240) fail(400, 'Invalid agent settings.');
   for (const key of ['claudePath', 'codexPath', 'cwd', 'claudeModel', 'codexModel'] as const) if (typeof next.agent[key] !== 'string' || next.agent[key].length > 1024 || next.agent[key].includes('\0')) fail(400, 'Invalid agent configuration.');
-  if (typeof next.httpsAddress !== 'string' || (next.httpsAddress && !/^[a-zA-Z0-9.:-]+$/.test(next.httpsAddress))) fail(400, 'Enter a hostname or IP address without a URL scheme.');
-  settings = { idleMs: next.idleMs, maxSaveMs: next.maxSaveMs, trashDays: next.trashDays, revisionLimit: next.revisionLimit, httpsAddress: next.httpsAddress, agent: next.agent };
+  settings = { idleMs: next.idleMs, maxSaveMs: next.maxSaveMs, trashDays: next.trashDays, revisionLimit: next.revisionLimit, agent: next.agent };
   await settingsCollection.updateOne({ _id: 'app' }, { $set: { value: settings } });
   collab.configure({ debounce: settings.idleMs, maxDebounce: settings.maxSaveMs });
-  refreshModels(); await configureHttps(); res.json(settings);
+  refreshModels(); res.json(settings);
 });
-async function configureHttps() {
-  const host = settings.httpsAddress || 'localhost';
-  const caddyData = path.resolve(arg('caddy-data', './data/caddy-host'));
-  const config = `{
- admin off
- auto_https disable_redirects
- skip_install_trust
- storage file_system {
-  root ${JSON.stringify(caddyData)}
- }
-}
-https://${host}:8443 {
- tls internal
- reverse_proxy 127.0.0.1:${Number(arg('port', '7777'))}
-}
-`;
-  const configPath = path.join(runtime, 'Caddyfile');
-  await writeFile(`${configPath}.tmp`, config); await rename(`${configPath}.tmp`, configPath);
-  // The optional host Caddy service watches this generated configuration.
-}
-await configureHttps();
-app.get('/api/certificate', async (_req, res) => {
-  const pem = await readFile(path.resolve(arg('caddy-data', './data/caddy-host'), 'pki/authorities/local/root.crt')).catch(() => null);
-  if (!pem) fail(503, 'Certificate is not ready. Start the HTTPS service first.');
-  res.setHeader('Content-Disposition', 'attachment; filename="garnet-local-ca.crt"'); res.type('application/x-x509-ca-cert').send(pem);
-});
-
 const runner = createAgentRunner(runtime, async (secret, event) => {
   const job = await jobs.findOne({ tokenHash: hashToken(secret), status: { $in: ['running', 'queued'] } });
   if (!job) throw new Error('Job is not active.');
@@ -428,6 +403,7 @@ const errorHandler: express.ErrorRequestHandler = (err, _req, res, _next) => {
 internal.use(errorHandler);
 await unlink(path.join(runtime, 'app.sock')).catch(() => {});
 const internalServer = internal.listen(path.join(runtime, 'app.sock'), () => void chmod(path.join(runtime, 'app.sock'), 0o600));
+app.use('/api', (_req, res) => res.status(404).json({ error: 'Not found' }));
 app.use('/assets', express.static(path.join(publicDir, 'assets'), { immutable: true, maxAge: '1y' }));
 app.use(express.static(publicDir, { maxAge: 0 }));
 app.get('/{*path}', (_req, res) => res.sendFile(path.join(publicDir, 'index.html')));
@@ -448,7 +424,12 @@ const maintenance = setInterval(async () => {
   } catch (error: any) { console.error('Maintenance:', error.message); }
 }, 30000);
 for (const d of await docs.find().toArray()) queueMirror(d._id);
-server.listen(Number(arg('port', '7777')), arg('host', '127.0.0.1'), () => console.log(`Garnet listening on ${arg('port', '7777')}`));
+const preferredPort = Number(arg('port', '7777'));
+const listenHost = arg('host', '127.0.0.1');
+const port = await listenAvailable(server, preferredPort, listenHost);
+await writeFile(path.join(runtime, 'listen.json.tmp'), JSON.stringify({ port, pid: process.pid }), { mode: 0o600 });
+await rename(path.join(runtime, 'listen.json.tmp'), path.join(runtime, 'listen.json'));
+console.log(`Garnet listening at http://${listenHost.includes(':') ? `[${listenHost}]` : listenHost}:${port}${port !== preferredPort ? ` (port ${preferredPort} was busy)` : ''}`);
 let shuttingDown = false;
 async function shutdown() { if (shuttingDown) return; shuttingDown = true; clearInterval(maintenance); server.close(); await Promise.all([modelCatalog.close(), runner.shutdown()]); for (const doc of collab.documents.values()) await saveDoc(doc.name, doc); for (const res of subscribers) res.end(); collab.closeConnections(); await Promise.allSettled([...serial.values()]); internalServer.close(); await mongo.close(); process.exit(0); }
 process.on('SIGTERM', shutdown); process.on('SIGINT', shutdown);
