@@ -31,7 +31,12 @@ test('navigation pins preserve the selected document and the combined menu', asy
   const beforeShortcut = page.url(); await page.keyboard.press('Alt+n'); await expect(page).not.toHaveURL(beforeShortcut); await expect(page.getByLabel('Document title')).toHaveValue('Untitled');
 });
 test('only changed content creates a version, with colored differences and safe restore', async ({ page }) => {
-  await page.locator('#menu-button').click(); await page.locator('#new-doc').click(); await page.getByLabel('Document title').fill('Version checks');
+  await expect(page.getByLabel('Document title')).toBeVisible();
+  const previousUrl = page.url();
+  await page.locator('#menu-button').click(); await page.locator('#new-doc').click();
+  await expect(page).not.toHaveURL(previousUrl);
+  await expect(page.getByLabel('Document title')).toHaveValue('Untitled');
+  await page.getByLabel('Document title').fill('Version checks');
   const id = new URL(page.url()).hash.slice(1);
   await page.locator('.prose').fill('First wording.');
   await expect.poll(async () => (await api(page, `/documents/${id}/state`)).data.markdown).toBe('First wording.');
