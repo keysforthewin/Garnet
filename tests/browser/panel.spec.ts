@@ -39,7 +39,7 @@ process.stdin.resume(); process.stdin.on('end', () => {
     await expect(page.locator('#ai-model option').first()).toHaveText('Default · claude-default');
     await expect(page.locator(`#ai-scope option[value="${second}"]`)).toHaveCount(0);
     await expect(page.locator(`#ai-scope option[value="${first}"]`)).toHaveCount(1);
-    await page.locator(`[data-id="${first}"]`).click();
+    await page.locator('#menu-button').click(); await page.locator(`[data-id="${first}"]`).click();
     await expect(page.locator(`#ai-scope option[value="${first}"]`)).toHaveCount(0);
     await expect(page.locator(`#ai-scope option[value="${second}"]`)).toHaveCount(1);
     await expect(page.locator('#ai-scope')).toHaveValue('current');

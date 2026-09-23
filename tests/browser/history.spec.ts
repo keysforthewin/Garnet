@@ -11,23 +11,22 @@ async function api(page: Page, url: string, method = 'GET', body?: any) {
 test.beforeEach(async ({ page }) => {
   await page.goto('/'); await page.getByLabel('Username', { exact: true }).fill('admin'); await page.getByLabel('Password', { exact: true }).fill('ed-test-password-2026'); await page.getByRole('button', { name: 'Sign in', exact: true }).click();
 });
-test('sidebar pins preserve the selected document and the simplified menu', async ({ page }) => {
+test('navigation pins preserve the selected document and the combined menu', async ({ page }) => {
   await expect(page.locator('#menu-button')).toBeVisible(); const previousUrl = page.url();
   await page.locator('#menu-button').click(); await page.locator('#new-doc').click(); await expect(page).not.toHaveURL(previousUrl); await expect(page.getByLabel('Document title')).toHaveValue('Untitled'); await page.getByLabel('Document title').fill('Pinned note');
   const id = new URL(page.url()).hash.slice(1);
   await page.locator('#menu-button').click(); await page.locator('#new-doc').click(); await expect(page).not.toHaveURL(new RegExp(`${id}$`)); await expect(page.getByLabel('Document title')).toHaveValue('Untitled'); await page.getByLabel('Document title').fill('Active note');
-  await page.locator(`[data-pin="${id}"]`).click();
+  await page.locator('#menu-button').click(); await page.locator(`[data-pin="${id}"]`).click();
   await expect(page.getByLabel('Document title')).toHaveValue('Active note');
   await expect(page.locator('.doc-row').first()).toContainText('Pinned note');
   await expect(page.locator(`[data-pin="${id}"]`)).toHaveAttribute('aria-pressed', 'true');
-  await page.locator('#menu-button').click();
-  await expect(page.locator('#pin, #original, #duplicate, #cache-status, #sidebar #new-doc')).toHaveCount(0);
-  expect(await page.locator('#document-menu button').evaluateAll(buttons => buttons.map(button => button.id))).toEqual(['toggle-sidebar', 'new-doc', 'export-button', 'history', 'settings-button', 'delete']);
-  await expect(page.locator('#sidebar #settings-button')).toHaveCount(0);
+  await expect(page.locator('#pin, #original, #duplicate, #cache-status, #toggle-sidebar')).toHaveCount(0);
+  expect(await page.locator('#document-menu button').evaluateAll(buttons => buttons.map(button => button.id))).toEqual(['new-doc', 'export-button', 'history', 'settings-button', 'delete']);
+  await expect(page.locator('#sidebar #settings-button')).toBeVisible();
   await expect(page.locator('#new-doc kbd')).toHaveText('Alt N');
   await expect(page.locator('#sidebar')).not.toContainText('available offline');
   await page.keyboard.press('Escape');
-  await page.reload(); await expect(page.locator(`[data-pin="${id}"]`)).toHaveAttribute('aria-pressed', 'true');
+  await page.reload(); await expect(page.locator('#navigation')).not.toBeVisible(); await page.locator('#menu-button').click(); await expect(page.locator(`[data-pin="${id}"]`)).toHaveAttribute('aria-pressed', 'true');
   await page.locator(`[data-pin="${id}"]`).click(); await expect(page.locator(`[data-pin="${id}"]`)).toHaveAttribute('aria-pressed', 'false');
   const beforeShortcut = page.url(); await page.keyboard.press('Alt+n'); await expect(page).not.toHaveURL(beforeShortcut); await expect(page.getByLabel('Document title')).toHaveValue('Untitled');
 });

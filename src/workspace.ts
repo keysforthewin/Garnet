@@ -40,27 +40,45 @@ export async function start(account: User) {
   for (const record of await cache.all<CachedDoc>('docs')) records.set(record.id, record);
   prefs = await cache.get('prefs', 'values') || {};
   document.documentElement.dataset.theme = prefs.theme || 'system';
-  $('#app').innerHTML = `<div class="workspace ${prefs.sidebarCollapsed ? 'sidebar-collapsed' : ''}"><aside id="sidebar"><div class="sidebar-top"><a href="#" class="wordmark" aria-label="Garnet home">Garnet</a><button id="collapse" class="icon-button" title="Collapse sidebar (Ctrl+\\)" aria-label="Collapse sidebar">«</button></div><label class="search-label"><span class="sr-only">Search documents</span><input id="search" type="search" placeholder="Search your notes…" autocomplete="off"><kbd>⌘ K</kbd></label><div class="list-heading"><span id="list-label">YOUR DOCUMENTS</span><span id="doc-count"></span></div><nav id="doc-list" aria-label="Documents"></nav><div class="sidebar-bottom"><button id="trash-button">Trash</button><button id="account-button" title="Account">${escape(user.username)}</button></div><div id="sync-error" class="sync-error" hidden></div></aside><main id="main"><header class="document-header"><div class="document-menu"><button id="menu-button" class="icon-button" aria-label="Open menu" aria-expanded="false" aria-controls="document-menu"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button><div id="document-menu" class="menu-dropdown" hidden></div></div><div class="header-actions"><button id="ai-button" class="ai-button">Ask AI <kbd>⌘ J</kbd></button></div></header><div id="empty"><div class="empty-mark">Garnet</div><h1>Room to think.</h1><p>A quick note, a rough idea, a shared draft.<br>Choose a document or start a fresh page.</p><button class="primary" id="empty-new">New document</button></div><section id="document" hidden><input id="document-title" aria-label="Document title" placeholder="Untitled" maxlength="200"><div id="toolbar" role="toolbar" aria-label="Formatting"><button data-command="bold" title="Bold (Ctrl+B)"><strong>B</strong></button><button data-command="italic" title="Italic (Ctrl+I)"><em>I</em></button><button data-command="strike" title="Strikethrough"><s>S</s></button><span class="toolbar-divider"></span><button data-command="heading" title="Heading">H2</button><button data-command="bulletList" title="Bullet list">List</button><button data-command="orderedList" title="Numbered list">1.</button><button data-command="taskList" title="Checklist">Tasks</button><button data-command="blockquote" title="Quote">Quote</button><button data-command="codeBlock" title="Code block">Code</button><button data-command="link" title="Insert link">Link</button><button data-command="table" title="Insert table">Table</button><span class="toolbar-divider"></span><button data-command="undo" title="Undo">↶</button><button data-command="redo" title="Redo">↷</button></div><div id="editor-mount"></div><footer class="document-footer"><span id="word-count"></span><span id="people"></span></footer></section></main><aside id="ai-panel" hidden></aside></div>`;
+  $('#app').innerHTML = `<div class="workspace"><dialog id="navigation" aria-label="Navigation"><aside id="sidebar"><div class="sidebar-top"><label class="search-label"><span class="sr-only">Search documents</span><input id="search" type="search" placeholder="Search your notes…" autocomplete="off"></label><kbd>⌘ K</kbd><button id="collapse" class="icon-button" autofocus title="Close navigation (Esc)" aria-label="Close navigation">×</button></div><div class="list-heading"><span id="list-label">YOUR DOCUMENTS</span><span id="doc-count"></span></div><nav id="doc-list" aria-label="Documents"></nav><div id="document-menu" class="menu-dropdown"></div><div class="sidebar-bottom"><button id="trash-button">Trash</button><button id="account-button" title="Account">${escape(user.username)}</button></div><div id="sync-error" class="sync-error" hidden></div></aside></dialog><main id="main"><header class="document-header"><div class="document-menu"><button id="menu-button" class="icon-button" aria-label="Open menu" aria-expanded="false" aria-controls="navigation" aria-haspopup="dialog"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button></div><div class="header-actions"><button id="ai-button" class="ai-button">Ask AI <kbd>⌘ J</kbd></button></div></header><div id="empty"><div class="empty-mark">Garnet</div><h1>Room to think.</h1><p>A quick note, a rough idea, a shared draft.<br>Choose a document or start a fresh page.</p><button class="primary" id="empty-new">New document</button></div><section id="document" hidden><input id="document-title" aria-label="Document title" placeholder="Untitled" maxlength="200"><div id="toolbar" role="toolbar" aria-label="Formatting"><button data-command="bold" title="Bold (Ctrl+B)"><strong>B</strong></button><button data-command="italic" title="Italic (Ctrl+I)"><em>I</em></button><button data-command="strike" title="Strikethrough"><s>S</s></button><span class="toolbar-divider"></span><button data-command="heading" title="Heading">H2</button><button data-command="bulletList" title="Bullet list">List</button><button data-command="orderedList" title="Numbered list">1.</button><button data-command="taskList" title="Checklist">Tasks</button><button data-command="blockquote" title="Quote">Quote</button><button data-command="codeBlock" title="Code block">Code</button><button data-command="link" title="Insert link">Link</button><button data-command="table" title="Insert table">Table</button><span class="toolbar-divider"></span><button data-command="undo" title="Undo">↶</button><button data-command="redo" title="Redo">↷</button></div><div id="editor-mount"></div><footer class="document-footer"><span id="word-count"></span><span id="people"></span></footer></section></main><aside id="ai-panel" hidden></aside></div>`;
   $('#empty-new').onclick = () => void newDocument();
-  $('#collapse').onclick = () => toggleSidebar(true);
+  $('#collapse').onclick = () => closeMenu();
   $('#search').oninput = () => { searchQuery = ($<HTMLInputElement>('#search')).value; worker.postMessage({ type: 'search', query: searchQuery }); };
   worker.onmessage = ({ data }) => { if (data.query === searchQuery) { matches = searchQuery.trim() ? new Set(data.ids) : null; renderList(); } };
   $('#trash-button').onclick = () => { showingTrash = !showingTrash; $('#trash-button').classList.toggle('selected', showingTrash); renderList(); };
-  $('#account-button').onclick = showAccount;
-  $('#menu-button').onclick = () => { if ($('#document-menu').hidden) documentOptions(); else closeMenu(); };
-  document.addEventListener('pointerdown', e => { if (!(e.target as Element).closest('.document-menu')) closeMenu(false); });
-  $('.document-menu').addEventListener('focusout', e => { if (!(e.currentTarget as HTMLElement).contains((e as FocusEvent).relatedTarget as Node | null)) closeMenu(false); });
-  $('.document-menu').addEventListener('keydown', e => {
-    if (e.key === 'Escape') { e.preventDefault(); closeMenu(); }
-    if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(e.key)) {
-      e.preventDefault();
-      if ($('#document-menu').hidden) documentOptions();
-      const buttons = [...$('#document-menu').querySelectorAll<HTMLButtonElement>('button:not(:disabled)')];
-      const current = buttons.indexOf(document.activeElement as HTMLButtonElement);
-      const index = e.key === 'Home' ? 0 : e.key === 'End' ? buttons.length - 1 : (current + (e.key === 'ArrowDown' ? 1 : current < 0 ? 0 : -1) + buttons.length) % buttons.length;
-      buttons[index]?.focus();
-    }
+  $('#account-button').onclick = () => { closeMenu(); showAccount(); };
+  const navigation = $<HTMLDialogElement>('#navigation');
+  $('#menu-button').onclick = () => { if (navigation.open) closeMenu(); else documentOptions(); };
+  navigation.addEventListener('close', () => $('#menu-button').setAttribute('aria-expanded', 'false'));
+  navigation.addEventListener('pointerdown', e => {
+    if (e.target !== navigation) return;
+    const rect = navigation.getBoundingClientRect();
+    if (e.clientX < rect.left || e.clientX > rect.right || e.clientY < rect.top || e.clientY > rect.bottom) closeMenu();
   });
+  navigation.addEventListener('keydown', e => {
+    if (e.key === 'Tab') {
+      const targets = [...navigation.querySelectorAll<HTMLElement>('a[href],button:not(:disabled),input:not(:disabled)')].filter(el => el.getClientRects().length);
+      const first = targets[0]; const last = targets.at(-1);
+      if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last?.focus(); }
+      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first?.focus(); }
+      return;
+    }
+    if (!(e.target instanceof HTMLButtonElement) || !['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(e.key)) return;
+    e.preventDefault();
+    const buttons = [...navigation.querySelectorAll<HTMLButtonElement>('button:not(:disabled)')];
+    const current = buttons.indexOf(document.activeElement as HTMLButtonElement);
+    const index = e.key === 'Home' ? 0 : e.key === 'End' ? buttons.length - 1 : (current + (e.key === 'ArrowDown' ? 1 : -1) + buttons.length) % buttons.length;
+    buttons[index]?.focus();
+  });
+  $('#menu-button').addEventListener('keydown', e => {
+    if (e.key === 'ArrowDown') { e.preventDefault(); documentOptions(); }
+  });
+  const updateViewport = () => {
+    const viewport = window.visualViewport;
+    if (viewport && viewport.scale === 1) document.documentElement.style.setProperty('--visible-height', `${viewport.height}px`);
+  };
+  window.visualViewport?.addEventListener('resize', updateViewport);
+  updateViewport();
   $('#ai-button').onclick = () => void toggleAI();
   $('#document-title').oninput = () => {
     const id = activeId; const record = records.get(id)!; record.title = $<HTMLInputElement>('#document-title').value || 'Untitled';
@@ -71,9 +89,9 @@ export async function start(account: User) {
   $('#toolbar').addEventListener('click', e => { const button = (e.target as Element).closest<HTMLButtonElement>('button[data-command]'); if (button && editor) command(button.dataset.command!); });
   $('#main').addEventListener('scroll', () => saveCursor(), { passive: true });
   document.addEventListener('keydown', e => {
-    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); toggleSidebar(false); $<HTMLInputElement>('#search').focus(); }
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); documentOptions(); $<HTMLInputElement>('#search').focus(); }
     if ((e.altKey && e.key.toLowerCase() === 'n') || ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'n')) { e.preventDefault(); void newDocument(); }
-    if ((e.ctrlKey || e.metaKey) && e.key === '\\') { e.preventDefault(); toggleSidebar(!$('.workspace').classList.contains('sidebar-collapsed')); }
+    if ((e.ctrlKey || e.metaKey) && e.key === '\\') { e.preventDefault(); if ($<HTMLDialogElement>('#navigation').open) closeMenu(); else documentOptions(); }
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'j') { e.preventDefault(); void toggleAI(); }
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') { e.preventDefault(); flushActive().catch(e => toast(e.message)); }
   });
@@ -82,13 +100,29 @@ export async function start(account: User) {
   window.addEventListener('offline', () => { online = false; status(); });
   window.addEventListener('online', () => { void synchronize(); });
   renderList(); worker.postMessage({ type: 'index', docs: [...records.values()] });
-  const hashId = location.hash.slice(1); const initial = hashId || prefs.lastDocument;
-  if (initial && records.has(initial) && !records.get(initial)!.deletedAt) await openDocument(initial, false);
+  const hashId = location.hash.slice(1);
+  const available = (id: string | undefined) => id && records.has(id) && !records.get(id)!.deletedAt && !records.get(id)!.purgedAt;
+  window.addEventListener('hashchange', () => {
+    const linked = location.hash.slice(1);
+    const target = available(linked) ? linked : prefs.lastDocument;
+    if (available(target)) void openDocument(target, false);
+  });
+  const initial = hashId || prefs.lastDocument;
+  let startupOpen = currentOpen;
+  if (available(initial)) {
+    const opening = openDocument(initial, false);
+    startupOpen = currentOpen;
+    await opening;
+  }
   await synchronize();
-  if (!activeId && initial && records.has(initial) && !records.get(initial)!.deletedAt) await openDocument(initial, false);
+  // A new device only learns lastDocument during sync. Never override a user
+  // selection (including one still loading) with this delayed startup choice.
+  if (!activeId && currentOpen === startupOpen) {
+    const restored = available(hashId) ? hashId : prefs.lastDocument;
+    if (available(restored)) await openDocument(restored, false);
+  }
   setInterval(() => void synchronize(), 20000);
 }
-function toggleSidebar(collapsed: boolean) { $('.workspace').classList.toggle('sidebar-collapsed', collapsed); markPreference('sidebarCollapsed', collapsed); }
 function status(message?: 'local-error' | 'saving' | 'auth-required') {
   if (!activeId) { $('#main').dataset.saveState = online ? 'idle' : 'offline'; return; }
   const d = records.get(activeId)!;
@@ -182,13 +216,13 @@ async function openDocument(id: string, focus = true) {
   const entry = await getOpen(id); if (count !== currentOpen) return;
   editor?.destroy(); editor = undefined; activeId = id; markPreference('lastDocument', id); history.replaceState(null, '', `#${id}`);
   $('#empty').hidden = true; $('#document').hidden = false; $<HTMLInputElement>('#document-title').value = record.title;
-  closeMenu(false);
+  if (focus) closeMenu(false);
   $('#editor-mount').replaceChildren();
   editor = new Editor({ element: $('#editor-mount'), extensions: [...extensions(), Collaboration.configure({ document: entry.doc }), ...(entry.provider ? [CollaborationCaret.configure({ provider: entry.provider, user: { name: user.username, color: ['#557a59', '#617daf', '#ab6f47', '#9275a9'][user.username.charCodeAt(0) % 4] } })] : [])], editorProps: { attributes: { class: 'prose', spellcheck: 'true', 'aria-label': 'Document content', 'data-placeholder': 'Start writing…', role: 'textbox', 'aria-multiline': 'true' } },
     onUpdate: () => { updateWordCount(); }, onSelectionUpdate: () => { saveCursor(); updateToolbar(); },
   });
   restoreCursor(focus); updateWordCount(); renderList(); status();
-  if (window.innerWidth < 760) toggleSidebar(true);
+  if ($<HTMLDialogElement>('#navigation').open) documentOptions();
   while (opened.size > 8) {
     const candidate = [...opened].filter(([key, value]) => key !== activeId && !records.get(key)?.dirty).sort((a, b) => a[1].touched - b[1].touched)[0];
     if (!candidate) break; await saveLocal(candidate[0]); candidate[1].provider?.destroy(); await candidate[1].persistence.destroy(); candidate[1].doc.destroy(); opened.delete(candidate[0]);
@@ -306,26 +340,27 @@ export async function importFiles(files: FileList | File[]) {
   }
 }
 function closeMenu(focus = true) {
-  if ($('#document-menu').hidden) return;
-  $('#document-menu').hidden = true;
+  const navigation = $<HTMLDialogElement>('#navigation');
+  if (!navigation.open) return;
+  navigation.close();
   $('#menu-button').setAttribute('aria-expanded', 'false');
-  if (focus) $('#menu-button').focus();
+  if (focus) $('#menu-button').focus({ preventScroll: true });
 }
 function documentOptions() {
   const id = activeId; const record = records.get(id);
   const d = $('#document-menu');
   const disabled = record ? '' : 'disabled';
-  d.innerHTML = `<button id="toggle-sidebar">${$('.workspace').classList.contains('sidebar-collapsed') ? 'Show' : 'Hide'} sidebar</button><hr><button id="new-doc" aria-keyshortcuts="Alt+N">New document <kbd>Alt N</kbd></button><button id="export-button" ${disabled}>Export</button><button id="history" ${disabled}>Version history</button><button id="settings-button">Settings</button><hr><button id="delete" class="danger" ${disabled}>Move to trash</button>`;
+  d.innerHTML = `<button id="new-doc" aria-keyshortcuts="Alt+N">New document <kbd>Alt N</kbd></button><button id="export-button" ${disabled}>Export</button><button id="history" ${disabled}>Version history</button><button id="settings-button">Settings</button><hr><button id="delete" class="danger" ${disabled}>Move to trash</button>`;
   const action = (selector: string, run: () => void | Promise<void>) => {
     d.querySelector(selector)!.addEventListener('click', () => { closeMenu(); Promise.resolve().then(run).catch(error => toast(error.message)); });
   };
   action('#new-doc', async () => { await newDocument(); });
-  action('#toggle-sidebar', () => toggleSidebar(!$('.workspace').classList.contains('sidebar-collapsed')));
   action('#export-button', exportOne);
   action('#history', () => showHistory(id));
   action('#settings-button', () => import('./settings').then(m => m.showSettings({ user, prefs, markPreference, exportAll, importFiles, account: showAccount })));
   action('#delete', () => setDeleted(id, true));
-  d.hidden = false;
+  const navigation = $<HTMLDialogElement>('#navigation');
+  if (!navigation.open) navigation.showModal();
   $('#menu-button').setAttribute('aria-expanded', 'true');
 }
 function revisionDiff(before: string, after: string) {
@@ -361,6 +396,7 @@ async function flushActive() {
   }
 }
 async function toggleAI() {
+  closeMenu(false);
   const panel = $('#ai-panel'); if (!panel.hidden) { panel.hidden = true; $('.workspace').classList.remove('ai-open'); return; }
   panel.hidden = false; $('.workspace').classList.add('ai-open');
   const { showAI } = await import('./ai'); showAI({ panel, records, active: () => activeId, flush: flushActive, close: () => { panel.hidden = true; $('.workspace').classList.remove('ai-open'); } });

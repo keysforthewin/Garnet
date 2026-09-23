@@ -22,7 +22,7 @@ function arg(name: string, fallback: string) { const at = process.argv.indexOf(`
 const storage = path.resolve(arg('storage', './data/documents'));
 const runtime = path.resolve(arg('runtime', './data/runtime'));
 const publicDir = path.resolve(arg('public', fileURLToPath(new URL('./public', import.meta.url))));
-const mongo = new MongoClient(arg('mongo', 'mongodb://127.0.0.1:27018/ed'), { serverSelectionTimeoutMS: 3000 });
+const mongo = new MongoClient(arg('mongo', process.env.GARNET_MONGO_URI || 'mongodb://127.0.0.1:27018/ed'), { serverSelectionTimeoutMS: 3000 });
 await mongo.connect();
 const db = mongo.db();
 const docs = db.collection<any>('documents');
