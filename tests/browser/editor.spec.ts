@@ -62,7 +62,7 @@ test.describe.serial('shared editor', () => {
     const download = page.waitForEvent('download'); await page.locator('#menu-button').click(); await page.locator('#export-button').click(); const exported = await download; expect(exported.suggestedFilename()).toMatch(/Shared-field-notes--.*\.md/); expect(await readFile((await exported.path())!, 'utf8')).toContain('Offline addition.');
     await page.locator('#menu-button').click(); await page.getByRole('button', { name: 'Move to trash' }).click(); await expect(page.getByRole('heading', { name: 'Room to think.' })).toBeVisible();
     await page.locator('#trash-button').click(); await page.locator('.doc-row').filter({ hasText: 'Shared field notes' }).click(); await page.getByRole('button', { name: 'Restore', exact: true }).click(); await page.locator('#trash-button').click(); await expect(page.locator('.doc-row').filter({ hasText: 'Shared field notes' })).toBeVisible();
-    await page.locator('#settings-button').click(); await page.getByLabel('Appearance').selectOption('dark'); await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark'); await page.getByLabel('Close', { exact: true }).click();
+    await page.locator('#menu-button').click(); await page.locator('#settings-button').click(); await page.getByLabel('Appearance').selectOption('dark'); await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark'); await page.getByLabel('Close', { exact: true }).click();
     await page.screenshot({ path: 'test-results/editor-dark.png' }); await context.close();
   });
 });

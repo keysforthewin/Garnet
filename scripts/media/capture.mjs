@@ -71,7 +71,7 @@ const alex = await login('Alex');
 const existing = await admin.api('/documents');
 const missing = notes.filter(([title]) => !existing.some(d => d.title === title && !d.deletedAt));
 if (missing.length) {
-  await alex.locator('#settings-button').click();
+  await alex.locator('#menu-button').click(); await alex.locator('#settings-button').click();
   await alex.getByRole('button', { name: 'Storage & HTTPS', exact: true }).click();
   await alex.locator('#import-files').setInputFiles(missing.map(([title, text]) => ({ name: `${title}.md`, mimeType: 'text/markdown', buffer: Buffer.from(text) })));
   if (await alex.getByLabel('Close', { exact: true }).isVisible()) await alex.getByLabel('Close', { exact: true }).click();

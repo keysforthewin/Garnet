@@ -22,7 +22,8 @@ test('sidebar pins preserve the selected document and the simplified menu', asyn
   await expect(page.locator(`[data-pin="${id}"]`)).toHaveAttribute('aria-pressed', 'true');
   await page.locator('#menu-button').click();
   await expect(page.locator('#pin, #original, #duplicate, #cache-status, #sidebar #new-doc')).toHaveCount(0);
-  await expect(page.locator('#document-menu button').first()).toHaveAttribute('id', 'new-doc');
+  expect(await page.locator('#document-menu button').evaluateAll(buttons => buttons.map(button => button.id))).toEqual(['toggle-sidebar', 'new-doc', 'export-button', 'history', 'settings-button', 'delete']);
+  await expect(page.locator('#sidebar #settings-button')).toHaveCount(0);
   await expect(page.locator('#new-doc kbd')).toHaveText('Alt N');
   await expect(page.locator('#sidebar')).not.toContainText('available offline');
   await page.keyboard.press('Escape');
@@ -64,7 +65,7 @@ test('only changed content creates a version, with colored differences and safe 
   await expect.poll(async () => (await api(page, `/documents/${id}/revisions`)).data.length).toBe(3);
 });
 test('separate model selectors refresh changed executable paths and preserve custom overrides', async ({ page }) => {
-  await page.locator('#settings-button').click(); await page.locator('[data-tab=agents]').click();
+  await page.locator('#menu-button').click(); await page.locator('#settings-button').click(); await page.locator('[data-tab=agents]').click();
   await expect(page.locator('[name=claudeModel]')).toBeVisible(); await expect(page.locator('[name=codexModel]')).toBeVisible();
   const original = (await api(page, '/settings')).data;
   try {
@@ -75,7 +76,7 @@ test('separate model selectors refresh changed executable paths and preserve cus
     await page.locator('#save-settings').click();
     await expect.poll(async () => (await api(page, '/settings')).data.agent.claudeModel).toBe('claude-custom');
     expect((await api(page, '/settings')).data.agent.codexModel).toBe('codex-custom');
-    await page.locator('[data-close]').click(); await page.locator('#settings-button').click(); await page.locator('[data-tab=agents]').click();
+    await page.locator('[data-close]').click(); await page.locator('#menu-button').click(); await page.locator('#settings-button').click(); await page.locator('[data-tab=agents]').click();
     await expect(page.locator('[name=claudeCustomModel]')).toHaveValue('claude-custom'); await expect(page.locator('[name=codexCustomModel]')).toHaveValue('codex-custom');
   } finally { await api(page, '/settings', 'PUT', original); }
 });

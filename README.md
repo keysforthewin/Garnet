@@ -94,7 +94,7 @@ The whole text library downloads in the background. After the application has lo
 - Changes display immediately and save locally before syncing in the background. Document actions, including Export, are in the top-left menu.
 - Changed content saves after 750 ms idle, at least every 5 seconds during continuous typing. Unchanged content does not create a version, change the saved timestamp, or rewrite its Markdown mirror. Collaboration state remains durable.
 - Version previews compare each saved version with its predecessor: green additions, red removals, and yellow changed passages. Old duplicate snapshots are omitted from the list without deleting history.
-- Pin documents from the pin icon beside each sidebar row. The menu starts with New document (Alt+N), followed by sidebar controls, Export, Version history, and Move to trash. Trash restores are shared actions.
+- Pin documents from the pin icon beside each sidebar row. The menu starts with Show/Hide sidebar, followed by New document (Alt+N), Export, Version history, and Settings. Move to trash is in its own bottom section. Trash restores are shared actions.
 - Export downloads current local content, including pending edits. Library ZIP export runs locally.
 
 Mongo holds binary Yjs state, metadata, revisions, accounts, sessions, settings, preferences, and agent conversations. Plain Markdown is an asynchronous projection; it is not sufficient to recreate collaboration history or accounts.
