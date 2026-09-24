@@ -1,2 +1,34 @@
 <!doctype html>
-<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="theme-color" content="#f6f6f3"><link rel="manifest" href="/manifest.webmanifest"><title>Garnet</title></head><body><div id="app"></div><script type="module" src="/src/main.ts"></script></body></html>
+<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="theme-color" content="#f6f6f3"><link rel="manifest" href="/manifest.webmanifest"><title>Garnet</title>
+<script>
+// A reload must never leave a blank page. If the app's own files fail to load before it
+// appears (an error a proxy or the browser cached, a server mid-restart), fetch them fresh
+// and reload once. If that fails too, say so and offer to try again.
+(() => {
+  const key = 'garnet-load-repair'; let failed = false;
+  const own = url => { try { const parsed = new URL(url, location.href); return parsed.origin === location.origin && parsed.pathname.startsWith('/assets/'); } catch { return false; } };
+  const assets = extra => [...new Set([extra, ...[...document.querySelectorAll('script[src],link[href]')].map(e => e.src || e.href), ...performance.getEntriesByType('resource').map(e => e.name)].filter(own))];
+  // Bypasses the browser's copy; a service worker passes the request on to the network when it has none.
+  const refresh = urls => Promise.all(urls.map(url => fetch(url, { cache: 'reload' }).catch(() => {})));
+  const show = urls => {
+    const app = document.querySelector('#app'); if (!app) return addEventListener('DOMContentLoaded', () => show(urls), { once: true });
+    app.innerHTML = '<main class="auth"><div class="wordmark">Garnet</div><h1>Garnet couldn’t load.</h1><p>Check your connection, then try again.</p><button class="primary">Try again</button></main>';
+    const button = app.querySelector('button');
+    button.onclick = async () => {
+      button.disabled = true;
+      // Last resort: a service worker holding a bad copy would serve it again, so start without one.
+      try { if (navigator.onLine) { for (const registration of await navigator.serviceWorker.getRegistrations()) await registration.unregister(); for (const name of await caches.keys()) if (/^(garnet|ed)-shell-/.test(name)) await caches.delete(name); } } catch {}
+      await refresh(urls); location.reload();
+    };
+  };
+  const recover = async url => {
+    if (failed || document.querySelector('#app')?.childElementCount) return; failed = true;
+    let repeated = true; try { repeated = Date.now() - Number(sessionStorage.getItem(key)) < 60000; sessionStorage.setItem(key, String(Date.now())); } catch {}
+    const urls = assets(url); await refresh(urls);
+    if (repeated) show(urls); else location.reload();
+  };
+  addEventListener('error', e => { const url = e.target instanceof HTMLScriptElement ? e.target.src : e.target instanceof HTMLLinkElement ? e.target.href : ''; if (own(url)) void recover(url); }, true);
+  addEventListener('vite:preloadError', e => void recover(String(e.payload?.message || '').match(/https?:\/\/\S+/)?.[0]));
+})();
+</script>
+</head><body><div id="app"></div><script type="module" src="/src/main.ts"></script></body></html>

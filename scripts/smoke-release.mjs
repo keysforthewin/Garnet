@@ -49,6 +49,11 @@ try {
         assert.equal(await response.text(), text);
       }
     }
+    // A cached 404 for an app file leaves the page blank, so a missing one must never be stored.
+    const missing = await fetch('http://127.0.0.1:7777/assets/missing-file.js');
+    assert.equal(missing.status, 404);
+    assert.equal(missing.headers.get('cache-control'), 'no-store');
+    assert.equal((await fetch('http://127.0.0.1:7777/')).headers.get('cache-control'), 'no-cache');
     const login=await fetch('http://127.0.0.1:7777/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:'admin',password:'password'})});
     assert.equal(login.status,200);
     console.log('Packaged app healthy; frontend assets in every encoding, deep links, and first login work with production-only dependencies.');

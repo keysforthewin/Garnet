@@ -27,6 +27,8 @@ const opened = new Map<string, OpenDoc>();
 interface LiveEditor { editor: Editor; awareness: Awareness; words?: string }
 const editors = new Map<string, LiveEditor>(); const keptEditors = 4;
 let user: User; let editor: Editor | undefined; let activeId = ''; let currentOpen = 0;
+// The document whose title the title field shows. A new one's shows before it finishes opening.
+let titleId = '';
 let prefs: Record<string, any> = {}; let preferenceTimer: ReturnType<typeof setTimeout>; let changedPrefs: Record<string, any> = {};
 let syncRunning = false; let syncAgain = false; let online = navigator.onLine; let events: EventSource | undefined; let searchQuery = ''; let matches: Set<string> | null = null;
 let localError = false; let showingTrash = false; let startupSession: Promise<Session> | undefined;
@@ -125,7 +127,7 @@ export async function start(account: User, session?: Promise<Session>) {
   });
   $('#ai-button').onclick = () => void toggleAI();
   $('#document-title').oninput = () => {
-    const id = activeId; const record = records.get(id)!; record.title = $<HTMLInputElement>('#document-title').value || 'Untitled';
+    const id = titleId; const record = records.get(id); if (!record) return; record.title = $<HTMLInputElement>('#document-title').value || 'Untitled';
     persist(record).catch(() => {}); renderList(); index(id, record.title);
     void enqueue(`/documents/${id}`, 'PATCH', { title: record.title, opId: crypto.randomUUID() });
   };
@@ -201,8 +203,11 @@ function drawList() {
   $('#list-label').textContent = showingTrash ? 'TRASH' : searchQuery ? 'SEARCH RESULTS' : 'YOUR DOCUMENTS'; $('#doc-count').textContent = String(docs.length);
   $('#doc-list').innerHTML = docs.length ? docs.map(d => `<div class="doc-item ${d.id === activeId ? 'active' : ''}"><button class="doc-row ${d.id === activeId ? 'active' : ''}" data-id="${d.id}" ${d.id === activeId ? 'aria-current="page"' : ''}><span class="document-glyph" aria-hidden="true">≡</span><span class="doc-name">${escape(d.title)}</span>${d.dirty || d.localOnly ? '<span class="pending-dot" title="Pending sync"></span>' : ''}</button>${showingTrash ? '' : `<button class="pin-button" data-pin="${d.id}" aria-label="${pins.has(d.id) ? 'Unpin' : 'Pin'} ${escape(d.title)}" aria-pressed="${pins.has(d.id)}" title="${pins.has(d.id) ? 'Unpin' : 'Pin to top'}"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 3h6v6l3 3v3H6v-3l3-3V3M12 15v6"/></svg></button>`}</div>`).join('') : `<p class="list-empty">${searchQuery ? 'No matching documents.' : showingTrash ? 'Trash is empty.' : 'Your first note starts here.'}</p>`;
 }
+let lastOperation = 0;
 async function enqueue(url: string, method: string, body: any) {
-  const operation: Operation = { id: method === 'PATCH' && body.title !== undefined ? `rename-${url.split('/')[2]}` : crypto.randomUUID(), version: crypto.randomUUID(), path: url, method, body, createdAt: Date.now() };
+  // Strictly increasing, so operations queued in the same millisecond still sync in order.
+  const createdAt = lastOperation = Math.max(Date.now(), lastOperation + 1);
+  const operation: Operation = { id: method === 'PATCH' && body.title !== undefined ? `rename-${url.split('/')[2]}` : crypto.randomUUID(), version: crypto.randomUUID(), path: url, method, body, createdAt };
   // Push only: server changes arrive as events, and pulling the whole library for every queued edit is wasted work.
   try { await cache.put('ops', operation.id, operation); void synchronize(false); } catch (error) { localFailure(error); }
 }
@@ -211,11 +216,16 @@ async function newDocument(title = 'Untitled', initialMarkdown?: string) {
   // The worker converts and stores imported Markdown before the document opens and reads it.
   if (initialMarkdown !== undefined) { await ask({ type: 'import', id, markdown: initialMarkdown }); record.cached = true; }
   records.set(id, record); renderList(); index(id, title);
-  const persistTask = persist(record); void openDocument(id).then(async () => {
-    if (activeId !== id) return;
-    if (title === 'Untitled') { const input = $<HTMLInputElement>('#document-title'); input.focus(); input.select(); } else editor?.commands.focus('end');
-  });
-  await persistTask; await enqueue('/documents', 'POST', { id, title }); return id;
+  // Queue the creation now: a rename typed straight away must reach the server after it.
+  const persistTask = persist(record); const creating = enqueue('/documents', 'POST', { id, title });
+  const naming = title === 'Untitled';
+  void openDocument(id, !naming).then(() => { if (activeId === id && !naming) editor?.commands.focus('end'); });
+  if (naming) {
+    // Take typing in the new title at once, rather than in the previous document until this one opens.
+    closeMenu(false); hideEditor(); $('#empty').hidden = true; $('#document').hidden = false;
+    const input = $<HTMLInputElement>('#document-title'); input.value = title; titleId = id; input.focus(); input.select();
+  }
+  await persistTask; await creating; return id;
 }
 async function getOpen(id: string): Promise<OpenDoc> {
   let existing = opened.get(id); if (existing) { existing.touched = Date.now(); await existing.ready; return existing; }
@@ -300,7 +310,8 @@ async function openDocument(id: string, focus = true) {
   }
   const entry = await getOpen(id); if (count !== currentOpen) return;
   hideEditor(); activeId = id; markPreference('lastDocument', id); history.replaceState(null, '', `#${id}`);
-  $('#empty').hidden = true; $('#document').hidden = false; $<HTMLInputElement>('#document-title').value = record.title;
+  $('#empty').hidden = true; $('#document').hidden = false;
+  const title = $<HTMLInputElement>('#document-title'); if (titleId !== id || document.activeElement !== title) title.value = record.title; titleId = id;
   if (focus) closeMenu(false);
   // An editor built before its document's provider was replaced holds a destroyed awareness.
   let live = editors.get(id); if (live && live.awareness !== entry.awareness) { dropEditor(id); live = undefined; }
@@ -426,8 +437,9 @@ async function synchronize(pull = true) {
   try {
     if (pulling || !csrf || startup) {
       const me: Session = await (startup ?? api('/me'));
-      if (startup) {
-        // The page started as the cached account. Reload as the one the server reports, which may need a new password.
+      // The page started as the cached account, or the account must set a new password (as after a
+      // reinstall, whose sign-in this or another tab just made). Reload as the one the server reports.
+      if (startup || me.user.mustChangePassword) {
         let saved = true; try { localStorage.setItem('ed-user', JSON.stringify(me.user)); } catch { saved = false; }
         // Reloading without the new account saved would start as the cached one again.
         if (saved && (me.user.id !== user.id || me.user.mustChangePassword)) { location.reload(); return; }
@@ -498,7 +510,7 @@ async function applyRemote(d: DocMeta, pending: Set<string>) {
   records.set(d.id, next);
   if (activeId === d.id && d.deletedAt) closeActive();
   const title = $<HTMLInputElement>('#document-title');
-  if (existing && activeId === d.id && document.activeElement !== title && title.value !== next.title) title.value = next.title;
+  if (existing && titleId === d.id && document.activeElement !== title && title.value !== next.title) title.value = next.title;
   if (!existing || metaKeys.some(key => existing[key] !== next[key])) await persist(next);
   if (existing?.title !== next.title) index(next.id, next.title);
   // An editor connected to the server already receives new content over its socket.
@@ -511,7 +523,7 @@ async function recoverDeleted(record: CachedDoc) {
   records.set(id, recovered); await persist(recovered); await enqueue('/documents', 'POST', { id, title: recovered.title }); record.dirty = false;
   toast('A document was deleted elsewhere. Your pending edits were preserved in a recovered note.');
 }
-function closeActive() { dropEditor(activeId); activeId = ''; $('#document').hidden = true; $('#empty').hidden = false; closeMenu(false); status(); }
+function closeActive() { dropEditor(activeId); activeId = ''; titleId = ''; $('#document').hidden = true; $('#empty').hidden = false; closeMenu(false); status(); }
 async function setDeleted(id: string, deleted: boolean) {
   const record = records.get(id)!; await saveLocal(id); record.deletedAt = deleted ? Date.now() : null;
   if (deleted) { const entry = opened.get(id); if (entry) disconnect(entry); if (id !== activeId) dropEditor(id); }
@@ -604,7 +616,10 @@ async function toggleAI() {
 }
 function reauthenticate() {
   const d = dialog('Sign in to sync', `<p>Your local changes are retained.</p><form><label>Username<input name="username" value="${escape(user.username)}" readonly autocomplete="username"></label><label>Password<input name="password" type="password" required autocomplete="current-password"></label><button class="primary">Sign in</button></form>`);
-  d.querySelector('form')!.onsubmit = async e => { e.preventDefault(); try { const result = await api('/login', 'POST', Object.fromEntries(new FormData(e.currentTarget as HTMLFormElement))); setCsrf(result.csrf); d.close(); events?.close(); events = undefined; for (const entry of opened.values()) disconnect(entry); await synchronize(); if (activeId) await openDocument(activeId, false); } catch (error: any) { toast(error.message); } };
+  d.querySelector('form')!.onsubmit = async e => { e.preventDefault(); try { const result = await api('/login', 'POST', Object.fromEntries(new FormData(e.currentTarget as HTMLFormElement)));
+    // A reinstalled server's account needs a new password first (or is a different account): start again as it.
+    if (result.user.id !== user.id || result.user.mustChangePassword) { localStorage.setItem('ed-user', JSON.stringify(result.user)); location.reload(); return; }
+    setCsrf(result.csrf); d.close(); events?.close(); events = undefined; for (const entry of opened.values()) disconnect(entry); await synchronize(); if (activeId) await openDocument(activeId, false); } catch (error: any) { toast(error.message); } };
 }
 function showAccount() {
   const d = dialog('Your account', `<p>${escape(user.username)}${user.admin ? ' · Admin' : ''}</p><form id="change-password"><label>Current password<input name="current" type="password" autocomplete="current-password" required></label><label>New password<input name="password" type="password" autocomplete="new-password" minlength="10" required></label><button>Change password</button></form><hr><button id="sign-out">Sign out and clear this device’s cache</button>`);

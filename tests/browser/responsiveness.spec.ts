@@ -1,4 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
+import { MongoClient } from 'mongodb';
 const password = 'ed-test-password-2026';
 async function login(page: Page) {
   await page.goto('/'); await page.getByLabel('Username', { exact: true }).fill('admin'); await page.getByLabel('Password', { exact: true }).fill(password); await page.getByRole('button', { name: 'Sign in', exact: true }).click();
@@ -87,4 +88,51 @@ test('typing pauses store the offline copy and search text from the background w
   await page.locator('#menu-button').click(); await page.locator('#search').fill('quokka');
   await expect(page.locator('.doc-row')).toHaveCount(1);
   await expect(page.locator('.doc-row')).toContainText('Worker snapshot');
+});
+
+test('a new document takes typing in its title at once, before it finishes opening', async ({ page }) => {
+  await login(page); const previous = await note(page, 'Keeps its own title', 'The earlier document.');
+  // Alt+N from inside the earlier document, then type without waiting for the new one to open.
+  await page.locator('.prose').click(); await page.keyboard.press('Alt+N'); await page.keyboard.type('Named at once');
+  await expect(page).not.toHaveURL(new RegExp(previous));
+  await expect(page.getByLabel('Document title', { exact: true })).toHaveValue('Named at once');
+  const id = new URL(page.url()).hash.slice(1);
+  const titles = () => page.evaluate(async () => Object.fromEntries((await fetch('/api/documents').then(r => r.json())).map((d: any) => [d.id, d.title])));
+  await expect.poll(titles).toMatchObject({ [previous]: 'Keeps its own title', [id]: 'Named at once' });
+  await open(page, 'Keeps its own title'); await expect(page.locator('.prose')).toHaveText('The earlier document.');
+});
+
+test('signing in after a reinstall asks for a new password at once, in this tab and any other', async ({ browser }) => {
+  // Its own account, which the test resets the way a reinstall leaves the admin one.
+  const admin = await browser.newPage(); await login(admin);
+  expect(await admin.evaluate(async body => { const { csrf } = await fetch('/api/me').then(r => r.json()); return (await fetch('/api/users', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrf }, body: JSON.stringify(body) })).status; }, { username: 'reinstalled', password, admin: false })).toBe(201);
+  await admin.close();
+  const context = await browser.newContext({ serviceWorkers: 'block' }); const page = await context.newPage();
+  const setPassword = async (tab: Page, current: string, next: string) => {
+    await expect(tab.getByRole('heading', { name: 'Make this account yours.' })).toBeVisible();
+    await tab.getByLabel('Current password', { exact: true }).fill(current); await tab.getByLabel('New password', { exact: true }).fill(next); await tab.getByLabel('Confirm new password').fill(next);
+    await tab.getByRole('button', { name: 'Change password', exact: true }).click(); await expect(tab.locator('#menu-button')).toBeVisible();
+  };
+  try {
+    await page.goto('/'); await page.getByLabel('Username', { exact: true }).fill('reinstalled'); await page.getByLabel('Password', { exact: true }).fill(password); await page.getByRole('button', { name: 'Sign in', exact: true }).click();
+    const chosen = 'chosen-password-2026'; await setPassword(page, password, chosen);
+    await note(page, 'Before the reinstall', 'Kept on this device.');
+    const other = await context.newPage(); await other.goto('/'); await expect(other.locator('#menu-button')).toBeVisible();
+
+    const mongo = await new MongoClient('mongodb://127.0.0.1:27018/ed_test').connect();
+    try {
+      const account = await mongo.db().collection('users').findOne({ username: 'reinstalled' });
+      await mongo.db().collection('users').updateOne({ _id: account!._id }, { $set: { mustChangePassword: true } }); await mongo.db().collection('sessions').deleteMany({ userId: account!._id });
+    } finally { await mongo.close(); }
+
+    await page.reload();
+    const signIn = page.locator('dialog', { hasText: 'Your local changes are retained.' });
+    await signIn.getByLabel('Password', { exact: true }).fill(chosen); await signIn.getByRole('button', { name: 'Sign in', exact: true }).click();
+    await expect(page.getByRole('heading', { name: 'Make this account yours.' })).toBeVisible();
+    // The other tab's next sync finds the same account waiting for a new password.
+    await other.evaluate(() => dispatchEvent(new Event('online')));
+    await expect(other.getByRole('heading', { name: 'Make this account yours.' })).toBeVisible();
+    await setPassword(page, chosen, 'second-password-2026');
+    await open(page, 'Before the reinstall'); await expect(page.locator('.prose')).toHaveText('Kept on this device.');
+  } finally { await context.close(); }
 });

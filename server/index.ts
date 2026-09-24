@@ -10,7 +10,7 @@ import { Hocuspocus } from '@hocuspocus/server';
 import { MongoClient } from 'mongodb';
 import { mkdir, writeFile, rename, unlink, chmod, readFile, readdir } from 'node:fs/promises';
 import path from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
 import * as Y from 'yjs';
 import { yDocToProsemirrorJSON, updateYFragment, initProseMirrorDoc } from '@tiptap/y-tiptap';
 import { filename } from '../shared/editor.js';
@@ -85,10 +85,12 @@ function sameOrigin(req: express.Request) {
   if (!origin) return true;
   try { return new URL(origin).host === req.get('host'); } catch { return false; }
 }
+// The page's inline start-up check is allowed by its hash; other inline scripts stay blocked.
+const pageScripts = [...(await readFile(path.join(publicDir, 'index.html'), 'utf8').catch(() => '')).matchAll(/<script>([\s\S]*?)<\/script>/g)].map(([, code]) => ` 'sha256-${createHash('sha256').update(code).digest('base64')}'`).join('');
 app.use((req, res, next) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('Referrer-Policy', 'same-origin');
-  res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ws: wss:; worker-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'");
+  res.setHeader('Content-Security-Policy', `default-src 'self'; script-src 'self'${pageScripts}; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ws: wss:; worker-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'`);
   if (req.path.startsWith('/api')) res.setHeader('Cache-Control', 'no-store');
   if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method) && !sameOrigin(req)) return res.status(403).json({ error: 'Origin rejected.' });
   next();
@@ -399,7 +401,7 @@ internal.post('/tool', async (req, res) => {
 const errorHandler: express.ErrorRequestHandler = (err, _req, res, _next) => {
   const status = err.code === 11000 ? 409 : err.status || 500;
   if (status >= 500) console.error(err);
-  res.status(status).json({ error: err.code === 11000 ? 'That name is already in use.' : status >= 500 ? 'Service unavailable. Your local edits are retained.' : err.message });
+  res.status(status).set('Cache-Control', 'no-store').json({ error: err.code === 11000 ? 'That name is already in use.' : status >= 500 ? 'Service unavailable. Your local edits are retained.' : err.message });
 };
 internal.use(errorHandler);
 await unlink(path.join(runtime, 'app.sock')).catch(() => {});
@@ -417,11 +419,21 @@ app.use('/assets', (req, res, next) => {
   if (!file || !precompressed.has(file)) return next();
   res.vary('Accept-Encoding'); res.set({ 'Content-Type': type, 'Content-Encoding': encoding });
   // Send relative to a root: given an absolute path, any dot directory in it (like ~/.local) counts as hidden and returns 404.
-  res.sendFile(file, { root: path.join(publicDir, 'assets'), immutable: true, maxAge: '1y', acceptRanges: false }, error => { if (error) next(error); });
+  res.sendFile(file, { root: path.join(publicDir, 'assets'), immutable: true, maxAge: '1y', acceptRanges: false }, error => {
+    if (!error) return;
+    if (res.headersSent) return next(error);
+    // Send the uncompressed file instead.
+    res.removeHeader('Content-Encoding'); res.removeHeader('Content-Type'); next();
+  });
 });
 app.use('/assets', express.static(path.join(publicDir, 'assets'), { immutable: true, maxAge: '1y' }));
-app.use(express.static(publicDir, { maxAge: 0 }));
-app.get('/{*path}', (_req, res) => res.sendFile('index.html', { root: publicDir }));
+// Proxies and browsers can keep an error for hours (Cloudflare adds a 4-hour max-age), and
+// a page that loads a cached 404 for its own script stays blank. Never let one be stored.
+app.use('/assets', (_req, res) => { res.status(404).set('Cache-Control', 'no-store').end(); });
+// The page and service worker name the current assets, so always check them with the server.
+const revalidate = { cacheControl: false, setHeaders: (res: express.Response) => res.set('Cache-Control', 'no-cache') };
+app.use(express.static(publicDir, revalidate));
+app.get('/{*path}', (_req, res) => res.sendFile('index.html', { root: publicDir, cacheControl: false, headers: { 'Cache-Control': 'no-cache' } }));
 app.use(errorHandler);
 const maintenance = setInterval(async () => {
   try {
