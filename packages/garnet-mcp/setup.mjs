@@ -1,5 +1,6 @@
 import { access, readFile, writeFile, mkdir, rename, copyFile, rm, open, lstat } from 'node:fs/promises';
-import { constants } from 'node:fs';
+import { constants, openSync } from 'node:fs';
+import { ReadStream, WriteStream } from 'node:tty';
 import { execFileSync } from 'node:child_process';
 import { createInterface } from 'node:readline/promises';
 import { randomBytes, randomUUID } from 'node:crypto';
@@ -59,14 +60,24 @@ function run(command, args) {
   return execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 15000 });
 }
 export async function terminalPrompt() {
-  let input, output, terminal;
+  let input, output;
   try {
-    terminal = await open('/dev/tty', 'r+');
-    input = terminal.createReadStream({ autoClose: false }); output = terminal.createWriteStream({ autoClose: false });
-  } catch { return { ask: async () => false, close: async () => {} }; }
+    // TTY streams can cancel pending reads and let readline control echo/raw mode.
+    // fs streams cannot safely close a blocking /dev/tty read after a question.
+    input = new ReadStream(openSync('/dev/tty', 'r'));
+    output = new WriteStream(openSync('/dev/tty', 'w'));
+  } catch { input?.destroy(); return { ask: async () => false, close: async () => {} }; }
   const rl = createInterface({ input, output, terminal: true });
-  return { ask: async question => /^y(es)?$/i.test((await rl.question(`${question} [y/N] `)).trim()), close: async () => { rl.close(); input.destroy(); output.destroy(); await terminal.close(); } };
+  return {
+    ask: async question => /^y(es)?$/i.test((await rl.question(`${question} [y/N] `)).trim()),
+    close: async () => {
+      rl.close(); input.destroy();
+      // Flush readline's final terminal writes before destroying the output.
+      await new Promise(resolve => output.write('', () => { output.destroy(); resolve(); }));
+    },
+  };
 }
+
 export async function credential(runtime) {
   await mkdir(runtime, { recursive: true, mode: 0o700 });
   const file = path.join(runtime, 'mcp-token');

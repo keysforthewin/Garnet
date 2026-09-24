@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, writeFile, readFile, readdir, rm } from 'node:fs/promises';
 import { createServer } from 'node:http';
+import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import os from 'node:os';
@@ -71,4 +72,25 @@ test('source discovery uses its own stable launcher and missing installs are act
     await writeFile(path.join(root, 'build/tools.mjs'), ''); await writeFile(path.join(root, 'garnet'), '', { mode: 0o755 });
     assert.deepEqual((await installation(root)).args, ['mcp', `--root=${root}`]);
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('interactive setup closes its real terminal after both consent questions', { timeout: 10000 }, async t => {
+  const quote = value => "'" + value.replaceAll("'", "'\\''") + "'";
+  const code = `import {terminalPrompt} from './packages/garnet-mcp/setup.mjs';
+    const p=await terminalPrompt();
+    if(!await p.ask('Claude probe?'))process.exitCode=1;
+    if(!await p.ask('Codex probe?'))process.exitCode=1;
+    await p.close(); console.log('Terminal closed successfully');`;
+  const child = spawn('script', ['-qefc', `${quote(process.execPath)} --input-type=module -e ${quote(code)}`, '/dev/null']);
+  t.after(() => child.kill('SIGKILL'));
+  let output = ''; const answered = new Set();
+  child.stdout.on('data', chunk => {
+    output += chunk;
+    for (const name of ['Claude', 'Codex']) if (output.includes(`${name} probe?`) && !answered.has(name)) { answered.add(name); child.stdin.write('y\n'); }
+  });
+  child.stderr.on('data', chunk => output += chunk);
+  const codeResult = await new Promise((resolve, reject) => { child.on('exit', resolve); child.on('error', reject); });
+  assert.equal(codeResult, 0, output);
+  assert.match(output, /Terminal closed successfully/);
+  assert.equal(answered.size, 2);
 });

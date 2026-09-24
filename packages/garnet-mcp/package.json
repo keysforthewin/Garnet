@@ -1,6 +1,6 @@
 {
   "name": "garnet-mcp",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Connect local Claude Code and Codex agents to Garnet notes",
   "license": "MIT",
   "type": "module",
