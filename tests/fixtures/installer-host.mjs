@@ -48,6 +48,14 @@ childProcess.execFileSync = (command, args) => {
     return '';
   }
   if (name === 'loginctl') return 'yes';
+  if (name === 'flock' && args.includes('update-locked')) {
+    if (scenario.failUpdate) throw Error('Simulated update failure');
+    return '';
+  }
+  if (name === 'npm' && args[0] === 'exec' && args.some(arg => arg.startsWith('--package=garnet-mcp@')) && args.includes('setup')) {
+    if (scenario.failMcp) throw Error('Simulated npm setup failure');
+    return '';
+  }
   if (name === 'docker' || name === 'podman') {
     const state = kind => path.join(base, `mock-${kind}`);
     if (args[1] === 'inspect' && ['container', 'volume'].includes(args[0])) {
@@ -77,7 +85,7 @@ net.createServer = () => {
   server.close = callback => callback();
   return server;
 };
-globalThis.fetch = async () => ({ ok: true });
+globalThis.fetch = async () => ({ ok: true, arrayBuffer: async () => Buffer.from(JSON.stringify({ tag_name: 'v1.0.0', draft: false, prerelease: false })) });
 MongoClient.prototype.connect = async function () {
   if (scenario.noHost && !databaseStarted) throw Error('No host database');
   return this;

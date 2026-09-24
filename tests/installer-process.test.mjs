@@ -22,12 +22,14 @@ async function install(base, name, args = []) {
   await mkdir(stage, { recursive: true });
   await writeFile(path.join(stage, 'VERSION'), 'v1.0.0\n');
   await mkdir(path.join(stage, 'scripts'));
+  await mkdir(path.join(stage, 'packages/garnet-mcp'), { recursive: true });
+  await writeFile(path.join(stage, 'packages/garnet-mcp/package.json'), await readFile('packages/garnet-mcp/package.json'));
   await writeFile(path.join(stage, 'scripts/ports.mjs'), '// Current release marker for health checks.\n');
   return spawnSync(process.execPath, ['--import', path.resolve('tests/fixtures/installer-host.mjs'), 'scripts/manage.mjs', 'install', `--root=${base}`, `--stage=${stage}`, ...args], {
     env: { ...process.env, PATH: `${path.join(base, 'bin')}:${process.env.PATH}`, GARNET_TEST_ROOT: base }, encoding: 'utf8', timeout: 15000,
   });
 }
-const commands = async base => (await readFile(path.join(base, 'commands.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+const commands = async base => (await readFile(path.join(base, 'commands.jsonl'), 'utf8')).trim().split('\n').filter(Boolean).map(line => JSON.parse(line));
 test('installer creates user services, a private config, and a working managed launcher', async t => {
   const base = await fixture(t);
   const result = await install(base, 'first');
@@ -45,6 +47,8 @@ test('installer creates user services, a private config, and a working managed l
   const launcher = path.join(base, 'home/.local/bin/garnet');
   assert.equal(spawnSync('sh', ['-n', launcher]).status, 0);
   assert.ok((await commands(base)).some(parts => parts.includes('enable-linger')));
+  assert.ok((await commands(base)).some(parts => parts[0] === 'npm' && parts.includes('setup') && parts.includes(`--root=${base}`)));
+
 });
 test('the garnet command runs through the current release symlink', async t => {
   const base = await mkdtemp(path.join(os.tmpdir(), 'garnet-launcher-test-'));
@@ -166,4 +170,35 @@ test('uninstall refuses a database volume without ownership labels', async t => 
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /ownership/);
   assert.equal(await readFile(path.join(base, 'mock-volume'), 'utf8'), 'notes');
+});
+
+test('npm setup failure keeps the healthy Garnet installation and prints a retry command', async t => {
+  const base = await fixture(t, { failMcp: true });
+  const result = await install(base, 'npm-failure');
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stderr, /Retry: npx garnet-mcp setup/);
+  assert.match(await readlink(path.join(base, 'current')), /releases\/v1.0.0-/);
+});
+
+for (const command of ['update', 'update-locked']) test(`${command} ${command === 'update' ? 'runs' : 'skips'} interactive MCP setup`, async t => {
+  const base = await fixture(t);
+  assert.equal((await install(base, 'first')).status, 0);
+  await writeFile(path.join(base, 'commands.jsonl'), '');
+  const result = spawnSync(process.execPath, ['--import', path.resolve('tests/fixtures/installer-host.mjs'), 'scripts/manage.mjs', command, `--root=${base}`], {
+    env: { ...process.env, GARNET_TEST_ROOT: base }, encoding: 'utf8', timeout: 15000,
+  });
+  assert.equal(result.status, 0, result.stderr);
+  const setup = (await commands(base)).some(parts => parts[0] === 'npm' && parts.includes('setup'));
+  assert.equal(setup, command === 'update');
+});
+test('failed updates never run MCP setup', async t => {
+  const base = await fixture(t);
+  assert.equal((await install(base, 'first')).status, 0);
+  await writeFile(path.join(base, 'scenario.json'), JSON.stringify({ failUpdate: true }));
+  await writeFile(path.join(base, 'commands.jsonl'), '');
+  const result = spawnSync(process.execPath, ['--import', path.resolve('tests/fixtures/installer-host.mjs'), 'scripts/manage.mjs', 'update', `--root=${base}`], {
+    env: { ...process.env, GARNET_TEST_ROOT: base }, encoding: 'utf8', timeout: 15000,
+  });
+  assert.notEqual(result.status, 0);
+  assert.ok(!(await commands(base)).some(parts => parts[0] === 'npm' && parts.includes('setup')));
 });

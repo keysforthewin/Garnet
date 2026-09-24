@@ -1,3 +1,4 @@
+import { AgentEdits, showAgentEdit, finishAgentEdits } from './agent-edits';
 import { Editor } from '@tiptap/core';
 import Collaboration from '@tiptap/extension-collaboration';
 import CollaborationCaret from '@tiptap/extension-collaboration-caret';
@@ -279,6 +280,7 @@ function connect(id: string, entry: OpenDoc) {
     onAuthenticationFailed: () => { if (id === activeId) status('auth-required'); },
     onStateless: async ({ payload }) => {
       const event = JSON.parse(payload);
+      if (event.type === 'agent-edit') { const live = editors.get(id); if (live) showAgentEdit(live.editor, entry.doc, event, () => activeId === id); return; }
       if (event.type !== 'persisted') return;
       const generation = entry.generation; const signature = documentSignature(entry.doc);
       const hash = [...new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(signature)))].map(b => b.toString(16).padStart(2, '0')).join('');
@@ -342,7 +344,7 @@ async function openDocument(id: string, focus = true) {
 }
 function createEditor(entry: OpenDoc) {
   const live = { awareness: entry.awareness } as LiveEditor;
-  live.editor = new Editor({ extensions: [...extensions(), Collaboration.configure({ document: entry.doc }), CollaborationCaret.configure({ provider: { awareness: entry.awareness }, user: { name: user.username, color: ['#557a59', '#617daf', '#ab6f47', '#9275a9'][user.username.charCodeAt(0) % 4] } })], editorProps: { attributes: { class: 'prose', spellcheck: 'true', 'aria-label': 'Document content', 'data-placeholder': 'Start writing…', role: 'textbox', 'aria-multiline': 'true' }, handleDrop: (_view, event) => dropDocuments(live.editor, event) },
+  live.editor = new Editor({ extensions: [...extensions(), AgentEdits, Collaboration.configure({ document: entry.doc }), CollaborationCaret.configure({ provider: { awareness: entry.awareness }, user: { name: user.username, color: ['#557a59', '#617daf', '#ab6f47', '#9275a9'][user.username.charCodeAt(0) % 4] } })], editorProps: { attributes: { class: 'prose', spellcheck: 'true', 'aria-label': 'Document content', 'data-placeholder': 'Start writing…', role: 'textbox', 'aria-multiline': 'true' }, handleDrop: (_view, event) => dropDocuments(live.editor, event) },
     // Kept editors still apply collaborators' edits; only the visible one updates the page.
     onUpdate: () => { live.words = undefined; if (live.editor === editor) countWordsSoon(); },
     onSelectionUpdate: () => { if (live.editor === editor) { saveCursorSoon(); updateToolbar(); } },
@@ -358,6 +360,7 @@ function keepEditorStyle() {
 }
 // Takes the visible editor off the page, keeping it alive for a quick return.
 function hideEditor() {
+  if (editor) finishAgentEdits(editor, true);
   if (!editor) return;
   if (editor.view.hasFocus()) editor.view.dom.blur();
   editor.view.dom.remove(); editor = undefined;

@@ -8,7 +8,7 @@ await rm('build/runner.mjs.map', { force: true });
 await vite();
 await bundle({ entryPoints: ['server/index.ts'], outfile: 'build/server.mjs', bundle: true, platform: 'node', format: 'esm', target: 'node22', packages: 'external', sourcemap: true });
 await bundle({ entryPoints: ['server/document-extractor.ts'], outfile: 'build/document-extractor.mjs', bundle: true, platform: 'node', format: 'esm', target: 'node22', packages: 'external', sourcemap: true });
-await bundle({ entryPoints: ['runner/tools.ts'], outfile: 'build/tools.mjs', bundle: true, platform: 'node', format: 'esm', target: 'node22' });
+await bundle({ entryPoints: ['runner/tools.ts'], outfile: 'build/tools.mjs', banner: { js: "import { createRequire } from 'node:module'; const require = createRequire(import.meta.url);" }, bundle: true, platform: 'node', format: 'esm', target: 'node22' });
 const assets = (await readdir('build/public/assets')).map(file => `/assets/${file}`);
 const version = assets.filter(file => file.endsWith('.js')).join('|');
 const cacheName = `garnet-shell-${gzipSync(version).toString('hex').slice(-24)}`;

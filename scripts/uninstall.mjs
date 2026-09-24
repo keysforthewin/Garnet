@@ -3,6 +3,7 @@ import { existsSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import os from 'node:os';
+import { remove } from '../packages/garnet-mcp/setup.mjs';
 import { readConfig } from './install-lib.mjs';
 
 export async function uninstall(base) {
@@ -33,6 +34,7 @@ export async function uninstall(base) {
     const text = await readFile(file, 'utf8');
     if (name !== 'garnet-update.timer' && !text.includes(base) && !(name === 'garnet-mongo.service' && text.includes(db.container))) throw Error(`Unrecognized service ${name}; refusing removal.`);
   }
+  await remove({ runtime: path.join(config.data, 'runtime') });
   for (const name of names) {
     const file = path.join(units, name);
     if (!existsSync(file)) continue;

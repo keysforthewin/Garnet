@@ -36,6 +36,11 @@ jobs:
       - run: bash -n install.sh
       - run: npm run check
       - run: npm test
+      - run: node scripts/smoke-mcp-package.mjs
+      - name: Verify pinned setup package is published
+        run: |
+          version=$(node -p "require('./packages/garnet-mcp/package.json').version")
+          npm view "garnet-mcp@$version" version
       - run: npm run build
       - run: npx playwright install --with-deps chromium
       - run: npm run test:e2e

@@ -116,6 +116,27 @@ An existing host MongoDB server and its databases are preserved, as are data ado
 
 Garnet runs the web server and agent executor in **one Node process**, managed by the `garnet.service` user service. Claude and Codex run as short-lived subprocesses for model discovery and agent jobs, using your existing host CLI logins. There is no separate runner to start. Settings → Agents controls executable paths, separate Claude/Codex model choices, working directory, and timeout. Model lists come from the installed CLIs at startup and refresh when an executable or working directory changes. Each selector also supports the CLI default and a custom model. Discovery only initializes the CLI and requests its catalog; it sends no prompt. Codex uses its [model/list interface](https://learn.chatgpt.com/docs/app-server#list-models-modellist); Claude returns models during its CLI initialization handshake. In the Ask your agent panel, the Model selector overrides the configured default for your next message and remembers that choice when you return to the conversation. Select New conversation to start a fresh chat. Starting context lists the current document once, followed by the library and other documents. Each signed-in user can invoke agents with the host account's full access.
 
+## Connect your coding agent with MCP
+
+Garnet's installer and manual `garnet update` command offer to connect each detected Claude Code and Codex installation. Automatic updates do not change agent configuration. When upgrading from v0.1.9 or earlier, run `garnet update` a second time once: the old updater installs the new command but cannot run its new setup step. To connect agents later:
+
+```sh
+npx garnet-mcp setup
+```
+
+Answer yes for each agent you want to connect, then start a new agent session. Try **“Create a to-do list in Garnet”** or **“Read my launch notes in Garnet and add a testing checklist.”** The agent's normal tool approval rules still apply.
+
+The npm command connects an existing local Garnet installation; it does not install Garnet or MongoDB. Both must run under the same Linux account. Setup displays the executable/configuration paths and adds a user-level MCP entry after consent. It uses the stable `garnet mcp` command, so app updates do not require reconfiguration. No additional server port or browser login is needed.
+
+```sh
+npx garnet-mcp doctor     # Check the connection without changing notes
+npx garnet-mcp remove     # Disconnect tracked agents and revoke local access
+```
+
+Agent edits save immediately and show a **Garnet** cursor in open documents. Small insertions reveal at 240 characters per second; if an edit plus the remaining animation queue exceeds two seconds, content appears immediately with a highlight. Human interaction and reduced-motion preferences reveal content immediately. New notes appear in the library without interrupting your current document.
+
+See [MCP setup details](packages/garnet-mcp/README.md) for custom paths, unattended setup, other MCP clients, and access details. The setup package is available on [npm](https://www.npmjs.com/package/garnet-mcp). Maintainers can run `node packages/garnet-mcp/cli.mjs setup --root=/path/to/garnet` from a checkout with dependencies installed.
+
 ## Offline use
 
 Use the local loopback URL or your HTTPS Cloudflare hostname for browser offline support. Changing the hostname or local port creates a different browser origin, with its own login and offline cache.

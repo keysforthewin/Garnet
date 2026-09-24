@@ -10,14 +10,15 @@ const temporary = await mkdtemp(path.join(os.tmpdir(), 'garnet-release-'));
 try {
   await cp('build', path.join(temporary, 'build'), { recursive: true });
   await mkdir(path.join(temporary, 'scripts'));
-  for (const file of ['manage.mjs', 'service.mjs', 'install-lib.mjs', 'ports.mjs', 'retire-https.mjs', 'shell-path.mjs', 'uninstall.mjs']) await cp(`scripts/${file}`, path.join(temporary, 'scripts', file));
+  for (const file of ['manage.mjs', 'service.mjs', 'install-lib.mjs', 'ports.mjs', 'retire-https.mjs', 'shell-path.mjs', 'uninstall.mjs', 'mcp-launch.mjs']) await cp(`scripts/${file}`, path.join(temporary, 'scripts', file));
+  await cp('packages/garnet-mcp', path.join(temporary, 'packages/garnet-mcp'), { recursive: true, filter: source => !source.includes('node_modules') && !source.endsWith('.tgz') });
   for (const file of ['package.json', 'package-lock.json', 'LICENSE']) await cp(file, path.join(temporary, file));
   await writeFile(path.join(temporary, 'VERSION'), `${version}\n`);
   await mkdir('build/release', { recursive: true });
   const archive = path.resolve('build/release/garnet-linux.tar.gz');
   // Whitelist contents: never package host data, credentials, or node_modules.
   await rm(path.join(temporary, 'build/release'), { recursive: true, force: true });
-  execFileSync('tar', ['-czf', archive, '-C', temporary, 'build', 'scripts', 'package.json', 'package-lock.json', 'LICENSE', 'VERSION']);
+  execFileSync('tar', ['-czf', archive, '-C', temporary, 'build', 'scripts', 'packages', 'package.json', 'package-lock.json', 'LICENSE', 'VERSION']);
   const hash = createHash('sha256').update(await readFile(archive)).digest('hex');
   await writeFile('build/release/SHA256SUMS', `${hash}  garnet-linux.tar.gz\n`);
   console.log(`Packaged ${version}: ${archive}`);

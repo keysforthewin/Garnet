@@ -19,6 +19,9 @@ import { defaults, normalizeAgentSettings, type Settings } from '../shared/types
 import { persistenceSignature } from '../shared/sync.js';
 import { savedRevisions, type Revision } from '../shared/history.js';
 import { hashPassword, verifyPassword, hashToken, token, cookieValue, validatePassword } from './auth.js';
+import { agentEditEvent } from './agent-edits.js';
+import { validLocalCredential } from './mcp-access.js';
+import { documentTools, type DocumentToolName } from '../shared/mcp.js';
 import { convertDocument } from './document-import.js';
 import { documentFormat, maxImportBytes } from '../shared/document-import.js';
 
@@ -269,12 +272,15 @@ async function changeMarkdown(id: string, text: string, expected: string | undef
   const direct = await collab.openDirectConnection(id, { internal: true });
   try {
     const doc = direct.document!;
+    let editEvent: ReturnType<typeof agentEditEvent>;
     await direct.transact(doc => {
       if (expected && expected !== contentVersion(doc)) fail(409, 'Document changed. Read its current contents and retry.');
       if (docMarkdown(doc) === serializeMarkdown(json)) return;
-      const fragment = doc.getXmlFragment('default'); const { mapping } = initProseMirrorDoc(fragment, schema);
+      const fragment = doc.getXmlFragment('default'); const { mapping, doc: before } = initProseMirrorDoc(fragment, schema);
       updateYFragment(doc, fragment, node, { mapping, isOMark: new Map() });
+      if (reason.startsWith('agent ')) editEvent = agentEditEvent(doc, before, contentVersion(doc));
     });
+    if (editEvent) doc.broadcastStateless(JSON.stringify(editEvent));
     await saveDoc(id, doc, reason);
     return { id, version: contentVersion(doc), markdown: docMarkdown(doc) };
   } finally { await direct.disconnect(); }
@@ -358,7 +364,7 @@ const internal = express(); internal.use(express.json({ limit: '12mb' }));
 internal.use(async (req, res, next) => {
   const raw = req.headers.authorization?.replace(/^Bearer /, '');
   const job = raw && await jobs.findOne({ tokenHash: hashToken(raw), status: { $in: ['running', 'queued'] } });
-  if (!job) return res.status(401).json({ error: 'Job is not active.' });
+  if (!job && !(req.path === '/tool' && await validLocalCredential(path.join(runtime, 'mcp-token'), raw))) return res.status(401).json({ error: 'Garnet access is inactive. Run npx garnet-mcp setup.' });
   res.locals.job = job; next();
 });
 async function recordAgentEvent(job: any, event: any) {
@@ -371,17 +377,22 @@ async function recordAgentEvent(job: any, event: any) {
   broadcast('agent', { jobId: job._id, conversationId: job.conversationId, ...event });
 }
 internal.post('/tool', async (req, res) => {
-  const { name, arguments: args = {} } = req.body;
+  const name = req.body?.name as DocumentToolName;
+  if (!Object.hasOwn(documentTools, name)) fail(400, 'Unknown document tool.');
+  const parsed = documentTools[name].schema.safeParse(req.body.arguments || {});
+  if (!parsed.success) fail(400, parsed.error.issues.map(issue => issue.message).join('; '));
+  const args = parsed.data as any;
   if (name === 'list_documents' || name === 'search_documents') {
     const all = await docs.find({ deletedAt: null }, { projection: { state: 0, ops: 0 } }).toArray();
     const query = String(args.query || '').toLowerCase();
     return res.json(all.filter(d => !query || `${d.title}\n${d.markdown}`.toLowerCase().includes(query)).map(d => ({ ...meta(d), excerpt: d.markdown.slice(0, 300) })));
   }
   if (name === 'create_document') {
+    const initial = schema.nodeFromJSON(parseMarkdown(args.markdown || '')); initial.check();
     const id = randomUUID(); const empty = new Y.Doc();
     await docs.insertOne({ _id: id, title: titleValue(args.title || 'Untitled'), state: Buffer.from(Y.encodeStateAsUpdate(empty)), markdown: '', revision: 0, mirrorRevision: -1, createdAt: Date.now(), updatedAt: Date.now(), deletedAt: null, ops: [] }); empty.destroy();
-    if (args.markdown) await changeMarkdown(id, args.markdown, undefined, 'agent create');
-    const d = await docs.findOne({ _id: id }); broadcast('document', meta(d)); queueMirror(id); return res.json(meta(d));
+    const result = await changeMarkdown(id, args.markdown || '', undefined, 'agent create');
+    const d = await docs.findOne({ _id: id }); broadcast('document', meta(d)); queueMirror(id); return res.json({ ...meta(d), ...result });
   }
   validId(args.id);
   const record = await docs.findOne({ _id: args.id, deletedAt: null }); if (!record) fail(404, 'Document not found.');

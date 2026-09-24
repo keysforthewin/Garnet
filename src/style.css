@@ -59,3 +59,5 @@ select{appearance:none;padding-right:34px;background-image:url("data:image/svg+x
   .ai-compose-actions button{min-height:44px}
   .auth{margin-top:9vh}
 }
+
+.garnet-agent-caret{border-color:#ad3b58;visibility:visible}.garnet-agent-caret .collaboration-carets__label{background:#ad3b58}.garnet-edit-highlight{background:color-mix(in srgb,#ad3b58 14%,transparent)}.garnet-edit-hidden{visibility:hidden}

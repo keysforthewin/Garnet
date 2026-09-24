@@ -3,6 +3,7 @@ set -eu
 cd "$(dirname "$0")"
 case "${1:-help}" in
   build) npm ci --no-audit --no-fund; npm run check; npm test; npm run build ;;
+  mcp) shift; exec node --input-type=module -e 'import {launchMcp} from "./scripts/mcp-launch.mjs"; await launchMcp(process.cwd());' ;;
   install) shift; exec node scripts/install-service.mjs "$@" ;;
   run) shift; exec node build/server.mjs "$@" ;;
   start) systemctl --user start garnet.service ;;
@@ -12,5 +13,5 @@ case "${1:-help}" in
   url) node --input-type=module -e 'import {appPort} from "./scripts/ports.mjs"; console.log(`http://127.0.0.1:${await appPort({data:"./data"})}`);' ;;
   status) "$0" url; systemctl --user status garnet.service garnet-mongo.service --no-pager ;;
   test) npm run check; npm test; npm run test:e2e ;;
-  *) echo 'Usage: ./garnet {build|install [--port=NUMBER]|run|start|stop|update|url|logs|status|test}' ;;
+  *) echo 'Usage: ./garnet {mcp|build|install [--port=NUMBER]|run|start|stop|update|url|logs|status|test}' ;;
 esac

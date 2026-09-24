@@ -50,3 +50,5 @@ for (let attempt = 0; attempt < 90; attempt++) {
 }
 if (!ready) throw new Error('Garnet did not become healthy. Check ./garnet logs.');
 console.log(`Garnet installed: http://127.0.0.1:${await appPort({ data, port })}\nMongoDB: 127.0.0.1:${mongoPort}`);
+
+try { const pkg = JSON.parse(await readFile('packages/garnet-mcp/package.json', 'utf8')); execFileSync('npm', ['exec', '--yes', `--package=garnet-mcp@${pkg.version}`, '--', 'garnet-mcp', 'setup', `--root=${root}`], { stdio: 'inherit' }); } catch { console.error('Garnet is running. Connect agents later with: npx garnet-mcp setup --root=' + root); }

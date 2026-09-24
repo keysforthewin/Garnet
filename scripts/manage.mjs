@@ -5,6 +5,7 @@ import { availablePort, appPort, validPort } from './ports.mjs';
 import { retireHttps } from './retire-https.mjs';
 import os from 'node:os';
 import { setupPath } from './shell-path.mjs';
+import { launchMcp } from './mcp-launch.mjs';
 import { uninstall } from './uninstall.mjs';
 import { createInterface } from 'node:readline/promises';
 import path from 'node:path';
@@ -220,7 +221,14 @@ async function install(base, options) {
   const shellPath = await setupPath();
   if (shellPath.changed) console.log(`Added ~/.local/bin to PATH in ${shellPath.file}.`);
   if (!shellPath.active) console.log(`Open a new terminal, or run: ${shellPath.shell === 'fish' ? 'fish_add_path --path "$HOME/.local/bin"' : 'export PATH="$HOME/.local/bin:$PATH"'}`);
+  await connectAgents(base, config.node);
   console.log(`Installed ${version}. Open http://127.0.0.1:${await appPort(config)}\nMongoDB: ${new URL(config.database.uri).host}\nFirst login: admin / password; change the password when prompted.\nStarts at boot. Daily updates: ${config.autoUpdate ? 'on' : 'off'}.\nCommands: garnet url | status | logs | update | uninstall`);
+}
+async function connectAgents(base, node) {
+  try {
+    const pkg = JSON.parse(await readFile(path.join(base, 'current/packages/garnet-mcp/package.json'), 'utf8'));
+    run('npm', ['exec', '--yes', `--package=garnet-mcp@${pkg.version}`, '--', 'garnet-mcp', 'setup', `--root=${base}`], { env: { ...process.env, PATH: `${path.dirname(node)}:${process.env.PATH || ''}` } });
+  } catch (error) { console.error(`Garnet is installed; agent setup needs attention: ${error.message}\nRetry: npx garnet-mcp setup --root=${base}`); }
 }
 async function download(url) {
   const response = await fetch(url, { signal: AbortSignal.timeout(300000), headers: { 'User-Agent': 'Garnet-updater' } });
@@ -275,6 +283,7 @@ async function main() {
   const positional = args.filter(arg => !arg.startsWith('--'));
   const options = parseOptions(args.filter(arg => arg.startsWith('--')));
   const base = path.resolve(options.root || root);
+  if (command === 'mcp') return launchMcp(base);
   if (command === 'uninstall') {
     if (!options.yes) {
       if (!process.stdin.isTTY) throw Error('Uninstall deletes Garnet and its managed notes database. Run garnet uninstall --yes to confirm.');
@@ -293,7 +302,10 @@ async function main() {
   if (command === 'update-locked') return update(base);
   if (command === 'update') {
     const config = await readConfig(base);
-    return run('flock', ['-n', '-E', '75', path.join(base, 'install.lock'), config.node, fileURLToPath(import.meta.url), 'update-locked', `--root=${base}`]);
+    run('flock', ['-n', '-E', '75', path.join(base, 'install.lock'), config.node, fileURLToPath(import.meta.url), 'update-locked', `--root=${base}`]);
+    // Run outside the update lock and from the newly activated release. Timer
+    // updates enter update-locked directly and never request agent consent.
+    return connectAgents(base, config.node);
   }
   if (command === 'logs') return run('journalctl', ['--user', '-u', 'garnet.service', '-n', '80', '-f']);
   if (command === 'url') { console.log(`http://127.0.0.1:${await appPort(await readConfig(base))}`); return; }
@@ -322,7 +334,7 @@ async function main() {
     ctl(action === 'on' ? 'enable' : 'disable', '--now', 'garnet-update.timer');
     config.autoUpdate = action === 'on'; await atomicJSON(path.join(base, 'install.json'), config); return;
   }
-  console.log('Usage: garnet {start|stop|url|port NUMBER|status|logs|update|uninstall [--yes]|autoupdate on|off|status}');
+  console.log('Usage: garnet {mcp|start|stop|url|port NUMBER|status|logs|update|uninstall [--yes]|autoupdate on|off|status}');
 }
 // The garnet command runs this file through the `current` symlink, and Node reports the release's real path.
 if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
