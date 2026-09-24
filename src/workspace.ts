@@ -462,7 +462,7 @@ async function synchronize(pull = true) {
     if (pulling) {
       pullRunning = true; await remoteChanges;
       const serverPrefs = await api('/preferences'); prefs = { ...serverPrefs, ...prefs }; await cache.put('prefs', 'values', prefs);
-      const remote: DocMeta[] = await api('/documents');
+      const remote: DocMeta[] = await api('/documents'); await restoreLost(remote);
       const changed = await pendingDocuments();
       // Download a document being restored on a new device, or a link to one not yet downloaded, first and open it before the rest of the library.
       const wanted = wantedDocument?.id();
@@ -475,7 +475,10 @@ async function synchronize(pull = true) {
     for (const [id, record] of records) {
       if (record.deletedAt || record.localOnly) continue;
       if (record.dirty) await getOpen(id);
-      const entry = opened.get(id); if (entry) connect(id, entry);
+      const entry = opened.get(id); if (!entry) continue;
+      connect(id, entry);
+      // A restored document has a new connection, whose carets the editor showing it needs.
+      if (restored.delete(id) && id === activeId && editors.get(id)?.awareness !== entry.awareness) await openDocument(id, Boolean(editor?.view.hasFocus()));
     }
     if (!events) {
       events = new EventSource('/api/events');
@@ -500,6 +503,24 @@ async function synchronize(pull = true) {
       if (startup) reauthenticate();
     } else { status(); }
   } finally { syncRunning = false; pullRunning = false; if (online && (syncAgain || (await cache.all('ops')).length)) setTimeout(() => void synchronize(pullRequested), 250); }
+}
+// The server keeps a record of every document it has had, even purged ones, so a synced one it
+// doesn't list was lost with the server's data, as in a reinstall. This device's copy restores it,
+// and other devices' copies of it merge in. One in the trash, or never downloaded here, goes.
+const restored = new Set<string>();
+async function restoreLost(remote: DocMeta[]) {
+  const listed = new Set(remote.map(d => d.id)); let count = 0;
+  for (const record of records.values()) {
+    if (record.localOnly || record.purgedAt || listed.has(record.id)) continue;
+    // The server refused its connection, which retries ever more slowly. A new one starts once it's restored.
+    const entry = opened.get(record.id); if (entry) disconnect(entry);
+    if (record.cached && !record.deletedAt) { record.localOnly = true; record.dirty = true; restored.add(record.id); count++; }
+    else { record.purgedAt = Date.now(); if (record.id === activeId) closeActive(); }
+    await persist(record);
+  }
+  // The next pass creates them on the server, then uploads their content.
+  if (count) { syncAgain = true; toast(`The server had lost ${count === 1 ? 'a document' : `${count} documents`}. ${count === 1 ? 'It was' : 'They were'} restored from this device’s copy.`); }
+  renderList();
 }
 // Merges one document's server metadata into the local copy.
 async function applyRemote(d: DocMeta, pending: Set<string>) {

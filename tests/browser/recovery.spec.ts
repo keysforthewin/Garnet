@@ -1,6 +1,7 @@
 import { test, expect } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
 import { chmod, readFile } from 'node:fs/promises';
+import { MongoClient } from 'mongodb';
 test('retries server and mirror failures, rejects stale restore, and deduplicates actions', async ({ page }) => {
   test.setTimeout(120000);
   await page.goto('/'); await page.getByLabel('Username', { exact: true }).fill('admin'); await page.getByLabel('Password', { exact: true }).fill('ed-test-password-2026'); await page.getByRole('button', { name: 'Sign in', exact: true }).click();
@@ -70,4 +71,33 @@ test('a version 1 local cache is upgraded in place and still opens offline', asy
   }, id);
   expect(layout).toEqual({ version: 2, metaHasState: false, cached: true, contentHasState: true });
   await page.context().setOffline(false);
+});
+
+test('a document the server lost, as in a reinstall, is restored from the devices that have it and shared live again', async ({ browser }) => {
+  const signIn = async () => {
+    const page = await (await browser.newContext()).newPage();
+    await page.goto('/'); await page.getByLabel('Username', { exact: true }).fill('admin'); await page.getByLabel('Password', { exact: true }).fill('ed-test-password-2026'); await page.getByRole('button', { name: 'Sign in', exact: true }).click();
+    await expect(page.locator('#menu-button')).toBeVisible(); return page;
+  };
+  const [first, second] = [await signIn(), await signIn()];
+  try {
+    await first.locator('#menu-button').click(); await first.locator('#new-doc').click(); await first.keyboard.type('Lost with the server');
+    await first.locator('.prose').click(); await first.keyboard.type('Written before the loss.'); await expect(first.locator('#main')).toHaveAttribute('data-save-state', 'saved');
+    const id = new URL(first.url()).hash.slice(1);
+    await second.goto(`/#${id}`); await expect(second.locator('.prose')).toHaveText('Written before the loss.');
+    // A reinstall: the server starts again without the document.
+    const mongo = await new MongoClient('mongodb://127.0.0.1:27018/ed_test').connect();
+    try { await mongo.db().collection('documents').deleteOne({ _id: id as any }); } finally { await mongo.close(); }
+    execFileSync(process.execPath, ['scripts/test-app.mjs', 'start']);
+    for (const page of [first, second]) await page.reload();
+    await expect(first.locator('#toast')).toContainText('restored from this device’s copy');
+    await expect.poll(() => first.evaluate(async id => (await fetch('/api/documents').then(r => r.json())).some((d: any) => d.id === id), id)).toBe(true);
+    for (const [from, to, text] of [[first, second, ' From the first.'], [second, first, ' From the second.']] as const) {
+      await from.locator('.prose').click(); await from.keyboard.press('Control+End'); await from.keyboard.type(text);
+      await expect(to.locator('.prose')).toContainText(text.trim());
+    }
+    // Both copies shared their history, so merging them repeats nothing.
+    await expect.poll(() => first.evaluate(async id => (await fetch(`/api/documents/${id}/state`).then(r => r.json())).markdown.trim(), id)).toBe('Written before the loss. From the first. From the second.');
+    for (const page of [first, second]) await expect(page.locator('#main')).toHaveAttribute('data-save-state', 'saved');
+  } finally { await first.context().close(); await second.context().close(); }
 });
