@@ -30,6 +30,7 @@ Three square, silent demos with text overlays. Use the previews to open the vide
 - **Write together.** Live cursors and incremental Yjs updates keep collaboration responsive. Background library caching supports offline work.
 - **Bring your agents.** Claude and Codex can read and edit documents through Garnet's tools, using your existing host CLI accounts. Agent service usage is separate from the free app.
 - **Pick up offline.** A service worker caches the app shell, and IndexedDB stores your documents. Reconnect to merge changes.
+- **Drop documents into a note.** Drag files anywhere on the page: inside the editor, text inserts at the drop cursor; elsewhere, it inserts at the last editor cursor position. Supports TXT, Markdown, CSV/TSV, JSON, XML, YAML, PDF, Word (.doc/.docx), OpenDocument, RTF, HTML, EPUB, PPTX, and XLSX. Multiple files insert in order, with line breaks preserved, and undo together. Text files work offline; other formats are extracted on your Garnet server without saving the uploaded file. Limits: 20 MB per file and 2,097,152 characters per drop. Scanned documents require OCR before importing; formatting and images are not imported.
 
 <details>
 <summary>See collaboration and agents in action</summary>
@@ -99,7 +100,7 @@ The browser uses HTTPS to Cloudflare, and the connector forwards to Garnet over 
 
 - Linux
 - MongoDB
-- Node 22.12+ or 24
+- Node 22.13+ or 24
 
 ## Uninstall
 

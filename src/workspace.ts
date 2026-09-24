@@ -12,6 +12,7 @@ import { diffLines, type SavedRevision } from '../shared/history';
 import { api, csrf, setCsrf, toast, escape, dialog, download } from './api';
 import { unb64 } from './base64';
 import * as cache from './db';
+import { dropDocuments } from './document-drop';
 
 // Metadata stays in memory; content (base64 Yjs state and Markdown) lives in the 'content' store.
 interface CachedDoc extends DocMeta { cached?: boolean; dirty?: boolean; localOnly?: boolean }
@@ -134,6 +135,17 @@ export async function start(account: User, session?: Promise<Session>) {
   $('#toolbar').addEventListener('mousedown', e => { if ((e.target as Element).closest('button')) e.preventDefault(); });
   $('#toolbar').addEventListener('click', e => { const button = (e.target as Element).closest<HTMLButtonElement>('button[data-command]'); if (button && editor) command(button.dataset.command!); });
   $('#main').addEventListener('scroll', saveCursorSoon, { passive: true });
+  document.addEventListener('dragover', event => {
+    if (!event.dataTransfer?.types.includes('Files')) return;
+    event.preventDefault(); event.dataTransfer.dropEffect = 'copy';
+  });
+  document.addEventListener('drop', event => {
+    // Drops handled by the editor already used the pointer's document position.
+    if (event.defaultPrevented || !event.dataTransfer?.files.length) return;
+    event.preventDefault();
+    if (!editor) { toast('Open or create a document before dropping files.'); return; }
+    dropDocuments(editor, event, editor.state.selection.head);
+  });
   document.addEventListener('keydown', e => {
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); documentOptions(); $<HTMLInputElement>('#search').focus(); }
     if ((e.altKey && e.key.toLowerCase() === 'n') || ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'n')) { e.preventDefault(); void newDocument(); }
@@ -330,7 +342,7 @@ async function openDocument(id: string, focus = true) {
 }
 function createEditor(entry: OpenDoc) {
   const live = { awareness: entry.awareness } as LiveEditor;
-  live.editor = new Editor({ extensions: [...extensions(), Collaboration.configure({ document: entry.doc }), CollaborationCaret.configure({ provider: { awareness: entry.awareness }, user: { name: user.username, color: ['#557a59', '#617daf', '#ab6f47', '#9275a9'][user.username.charCodeAt(0) % 4] } })], editorProps: { attributes: { class: 'prose', spellcheck: 'true', 'aria-label': 'Document content', 'data-placeholder': 'Start writing…', role: 'textbox', 'aria-multiline': 'true' } },
+  live.editor = new Editor({ extensions: [...extensions(), Collaboration.configure({ document: entry.doc }), CollaborationCaret.configure({ provider: { awareness: entry.awareness }, user: { name: user.username, color: ['#557a59', '#617daf', '#ab6f47', '#9275a9'][user.username.charCodeAt(0) % 4] } })], editorProps: { attributes: { class: 'prose', spellcheck: 'true', 'aria-label': 'Document content', 'data-placeholder': 'Start writing…', role: 'textbox', 'aria-multiline': 'true' }, handleDrop: (_view, event) => dropDocuments(live.editor, event) },
     // Kept editors still apply collaborators' edits; only the visible one updates the page.
     onUpdate: () => { live.words = undefined; if (live.editor === editor) countWordsSoon(); },
     onSelectionUpdate: () => { if (live.editor === editor) { saveCursorSoon(); updateToolbar(); } },

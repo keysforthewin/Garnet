@@ -19,6 +19,8 @@ import { defaults, normalizeAgentSettings, type Settings } from '../shared/types
 import { persistenceSignature } from '../shared/sync.js';
 import { savedRevisions, type Revision } from '../shared/history.js';
 import { hashPassword, verifyPassword, hashToken, token, cookieValue, validatePassword } from './auth.js';
+import { convertDocument } from './document-import.js';
+import { documentFormat, maxImportBytes } from '../shared/document-import.js';
 
 function arg(name: string, fallback: string) { const at = process.argv.indexOf(`--${name}`); return at < 0 ? fallback : process.argv[at + 1]; }
 const storage = path.resolve(arg('storage', './data/documents'));
@@ -122,6 +124,12 @@ app.use('/api', async (req, res, next) => {
   next();
 });
 app.get('/api/me', (_req, res) => res.json({ user: publicUser(res.locals.user), csrf: res.locals.session.csrf }));
+app.post('/api/document-text', express.raw({ type: 'application/octet-stream', limit: maxImportBytes }), async (req, res) => {
+  const name = req.query.name;
+  if (typeof name !== 'string' || name.length > 255 || !documentFormat(name) || documentFormat(name) === 'text') fail(400, 'Unsupported document format.');
+  if (!Buffer.isBuffer(req.body) || !req.body.length) fail(400, 'Provide a document to extract.');
+  res.json({ text: await convertDocument(req.body, name) });
+});
 function closeSessionConnections(sessionId: string) {
   for (const document of collab.documents.values()) for (const connection of document.getConnections()) if (connection.context?.sessionId === sessionId) connection.close();
   for (const response of subscribers) if (response.locals.session?._id === sessionId) response.end();

@@ -36,7 +36,7 @@ if [[ -z $node_bin ]]; then
   done
 fi
 if [[ -n $node_bin ]]; then export PATH="$(dirname "$node_bin"):$PATH"; fi
-if [[ -z $node_bin ]] || ! "$node_bin" -e 'const [a,b]=process.versions.node.split(".").map(Number);process.exit((a===22&&b>=12)||a===24?0:1)' || ! command -v npm >/dev/null; then
+if [[ -z $node_bin ]] || ! "$node_bin" -e 'const [a,b]=process.versions.node.split(".").map(Number);process.exit((a===22&&b>=13)||a===24?0:1)' || ! command -v npm >/dev/null; then
   # Private runtime: never replace the user's system Node installation.
   command -v sha256sum >/dev/null || die 'sha256sum (coreutils) is required.'
   curl -fsSL --retry 3 https://nodejs.org/dist/latest-v24.x/SHASUMS256.txt -o "$scratch/node-checksums"
