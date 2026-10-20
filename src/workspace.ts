@@ -14,6 +14,7 @@ import { api, csrf, setCsrf, toast, escape, dialog, download } from './api';
 import { unb64 } from './base64';
 import * as cache from './db';
 import { dropDocuments } from './document-drop';
+import { pasteImages } from './images';
 
 // Metadata stays in memory; content (base64 Yjs state and Markdown) lives in the 'content' store.
 interface CachedDoc extends DocMeta { cached?: boolean; dirty?: boolean; localOnly?: boolean }
@@ -344,7 +345,7 @@ async function openDocument(id: string, focus = true) {
 }
 function createEditor(entry: OpenDoc) {
   const live = { awareness: entry.awareness } as LiveEditor;
-  live.editor = new Editor({ extensions: [...extensions(), AgentEdits, Collaboration.configure({ document: entry.doc }), CollaborationCaret.configure({ provider: { awareness: entry.awareness }, user: { name: user.username, color: ['#557a59', '#617daf', '#ab6f47', '#9275a9'][user.username.charCodeAt(0) % 4] } })], editorProps: { attributes: { class: 'prose', spellcheck: 'true', 'aria-label': 'Document content', 'data-placeholder': 'Start writing…', role: 'textbox', 'aria-multiline': 'true' }, handleDrop: (_view, event) => dropDocuments(live.editor, event) },
+  live.editor = new Editor({ extensions: [...extensions(), AgentEdits, Collaboration.configure({ document: entry.doc }), CollaborationCaret.configure({ provider: { awareness: entry.awareness }, user: { name: user.username, color: ['#557a59', '#617daf', '#ab6f47', '#9275a9'][user.username.charCodeAt(0) % 4] } })], editorProps: { attributes: { class: 'prose', spellcheck: 'true', 'aria-label': 'Document content', 'data-placeholder': 'Start writing…', role: 'textbox', 'aria-multiline': 'true' }, handleDrop: (_view, event) => dropDocuments(live.editor, event), handlePaste: (_view, event) => pasteImages(live.editor, event) },
     // Kept editors still apply collaborators' edits; only the visible one updates the page.
     onUpdate: () => { live.words = undefined; if (live.editor === editor) countWordsSoon(); },
     onSelectionUpdate: () => { if (live.editor === editor) { saveCursorSoon(); updateToolbar(); } },

@@ -13,6 +13,12 @@ test('Markdown keeps headings, tasks, links, code, and tables through repeated c
   assert.deepEqual(parseMarkdown(once), parseMarkdown(serializeMarkdown(parseMarkdown(once))));
   for (const match of ['# Notes', '[ ] First task', '[x] Done', 'https://example.com', 'const value = 1', 'one']) assert.ok(once.includes(match), match);
 });
+test('Markdown keeps uploaded images inline and valid, alone or within text', () => {
+  for (const text of ['Before\n\n![shot](/api/images/a)\n\nAfter', 'See ![shot](/api/images/a) here', '- ![shot](/api/images/a)', '> ![shot](/api/images/a)']) {
+    const json = parseMarkdown(text); schema.nodeFromJSON(json).check();
+    assert.match(serializeMarkdown(json), /!\[shot\]\(\/api\/images\/a\)/, text);
+  }
+});
 test('concurrent offline changes merge without losing either writer', () => {
   const a = new Y.Doc(); set(a, 'Original'); const b = new Y.Doc(); Y.applyUpdate(b, Y.encodeStateAsUpdate(a));
   const textA = (a.getXmlFragment('default').get(0) as Y.XmlElement).get(0) as Y.XmlText;

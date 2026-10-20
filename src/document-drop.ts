@@ -1,9 +1,10 @@
 import type { Editor } from '@tiptap/core';
 import { Fragment, Slice } from '@tiptap/pm/model';
-import { TextSelection } from '@tiptap/pm/state';
+import { TextSelection, type Selection, type Transaction } from '@tiptap/pm/state';
 import { absolutePositionToRelativePosition, relativePositionToAbsolutePosition, ySyncPluginKey, yUndoPluginKey } from '@tiptap/y-tiptap';
 import { documentFormat, decodeDocumentText, importText, maxImportBytes, maxImportCharacters } from '../shared/document-import';
 import { csrf, toast } from './api';
+import { insertImages, isImage } from './images';
 
 async function extract(file: File) {
   if (file.size > maxImportBytes) throw new Error('Files must be 20 MB or smaller.');
@@ -20,16 +21,41 @@ async function extract(file: File) {
 }
 
 // Capture a Yjs position before any asynchronous reads, so local and remote edits
-// cannot move an import away from the place the user dropped it.
+// cannot move an insert away from the place the user chose. The returned function
+// finds that place again, or undefined if it no longer exists.
+export function anchor(target: Editor, pos: number) {
+  const sync = ySyncPluginKey.getState(target.state);
+  if (!sync?.binding) return;
+  const relative = absolutePositionToRelativePosition(pos, sync.type, sync.binding.mapping);
+  return () => {
+    const current = ySyncPluginKey.getState(target.state);
+    return current?.binding ? relativePositionToAbsolutePosition(current.doc, current.type, relative, current.binding.mapping) ?? undefined : undefined;
+  };
+}
+
+// Dispatch an insert at `at` as its own undo step.
+export function commit(target: Editor, transaction: Transaction, at: number, selection: Selection) {
+  // Do not steal focus from another document or interrupt typing during the upload or conversion.
+  const moveCaret = target.view.dom.isConnected && target.state.selection.eq(selection);
+  if (moveCaret) transaction.setSelection(TextSelection.near(transaction.doc.resolve(transaction.mapping.map(at, 1))));
+  const undo = yUndoPluginKey.getState(target.state)?.undoManager;
+  undo?.stopCapturing();
+  target.view.dispatch(transaction);
+  undo?.stopCapturing();
+  if (moveCaret) target.view.focus();
+}
+
 export function dropDocuments(target: Editor, event: DragEvent, fallbackPosition?: number) {
-  const files = Array.from(event.dataTransfer?.files || []);
-  if (!files.length) return false;
+  const dropped = Array.from(event.dataTransfer?.files || []);
+  if (!dropped.length) return false;
   event.preventDefault();
   if (!target.isEditable) return true;
   const pos = fallbackPosition ?? target.view.posAtCoords({ left: event.clientX, top: event.clientY })?.pos;
-  const sync = ySyncPluginKey.getState(target.state);
-  if (pos === undefined || !sync?.binding) { toast('Drop the file over the document text.'); return true; }
-  const anchor = absolutePositionToRelativePosition(pos, sync.type, sync.binding.mapping);
+  const find = pos === undefined ? undefined : anchor(target, pos);
+  if (pos === undefined || !find) { toast('Drop the file over the document text.'); return true; }
+  const images = dropped.filter(isImage); const files = dropped.filter(file => !isImage(file));
+  if (images.length) insertImages(target, images, pos);
+  if (!files.length) return true;
   const selection = target.state.selection;
   toast(`Reading ${files.length === 1 ? files[0].name : `${files.length} documents`}…`);
   void (async () => {
@@ -45,9 +71,8 @@ export function dropDocuments(target: Editor, event: DragEvent, fallbackPosition
     }
     if (target.isDestroyed) { toast('Import canceled because the destination document was closed.'); return; }
     if (texts.length) {
-      const current = ySyncPluginKey.getState(target.state);
-      const at = current?.binding && relativePositionToAbsolutePosition(current.doc, current.type, anchor, current.binding.mapping);
-      if (at == null || !target.isEditable) { toast('Import canceled because the drop position is no longer available.'); return; }
+      const at = find();
+      if (at === undefined || !target.isEditable) { toast('Import canceled because the drop position is no longer available.'); return; }
       const text = texts.join('\n\n'); const { schema } = target.state;
       const transaction = target.state.tr;
       if (transaction.doc.resolve(at).parent.type.spec.code) transaction.insertText(text, at, at);
@@ -55,14 +80,7 @@ export function dropDocuments(target: Editor, event: DragEvent, fallbackPosition
         const paragraphs = text.split('\n').map(line => schema.nodes.paragraph.create(null, line ? schema.text(line) : undefined));
         transaction.replaceRange(at, at, new Slice(Fragment.fromArray(paragraphs), 1, 1));
       }
-      // Do not steal focus from another document or interrupt typing during conversion.
-      const moveCaret = target.view.dom.isConnected && target.state.selection.eq(selection);
-      if (moveCaret) transaction.setSelection(TextSelection.near(transaction.doc.resolve(transaction.mapping.map(at, 1))));
-      const undo = yUndoPluginKey.getState(target.state)?.undoManager;
-      undo?.stopCapturing();
-      target.view.dispatch(transaction);
-      undo?.stopCapturing();
-      if (moveCaret) target.view.focus();
+      commit(target, transaction, at, selection);
     }
     toast([texts.length ? `Inserted ${texts.length === 1 ? 'document text' : `${texts.length} documents`}.` : '', ...errors].filter(Boolean).join('\n'));
   })().catch(error => toast(`Could not insert document: ${error.message}`));

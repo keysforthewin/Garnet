@@ -24,6 +24,7 @@ import { validLocalCredential } from './mcp-access.js';
 import { documentTools, type DocumentToolName } from '../shared/mcp.js';
 import { convertDocument } from './document-import.js';
 import { documentFormat, maxImportBytes } from '../shared/document-import.js';
+import { imageType, imageTypes, maxImageBytes } from '../shared/images.js';
 
 function arg(name: string, fallback: string) { const at = process.argv.indexOf(`--${name}`); return at < 0 ? fallback : process.argv[at + 1]; }
 const storage = path.resolve(arg('storage', './data/documents'));
@@ -40,6 +41,7 @@ const histories = db.collection<any>('revisions');
 const preferences = db.collection<any>('preferences');
 const jobs = db.collection<any>('jobs');
 const conversations = db.collection<any>('conversations');
+const images = db.collection<any>('images');
 await Promise.all([
   users.createIndex({ username: 1 }, { unique: true }), sessions.createIndex({ expires: 1 }, { expireAfterSeconds: 0 }),
   histories.createIndex({ docId: 1, createdAt: -1 }), docs.createIndex({ updatedAt: 1 }),
@@ -132,6 +134,20 @@ app.post('/api/document-text', express.raw({ type: 'application/octet-stream', l
   if (typeof name !== 'string' || name.length > 255 || !documentFormat(name) || documentFormat(name) === 'text') fail(400, 'Unsupported document format.');
   if (!Buffer.isBuffer(req.body) || !req.body.length) fail(400, 'Provide a document to extract.');
   res.json({ text: await convertDocument(req.body, name) });
+});
+// Images are immutable and never removed, so undo and document history can bring them back.
+app.post('/api/images', express.raw({ type: imageTypes, limit: maxImageBytes }), async (req, res) => {
+  if (!Buffer.isBuffer(req.body) || !req.body.length) fail(400, 'Paste a PNG, JPEG, GIF or WebP image.');
+  const type = imageType(req.body);
+  if (!type) fail(400, 'This file is not a PNG, JPEG, GIF or WebP image.');
+  const id = randomUUID();
+  await images.insertOne({ _id: id, type, data: req.body, bytes: req.body.length, createdAt: Date.now(), createdBy: res.locals.user._id });
+  res.json({ id, src: `/api/images/${id}` });
+});
+app.get('/api/images/:id', async (req, res) => {
+  const image = await images.findOne({ _id: String(req.params.id) }, { promoteBuffers: true });
+  if (!image) fail(404, 'Image not found.');
+  res.set({ 'Content-Type': image.type, 'Cache-Control': 'private, max-age=31536000, immutable', 'X-Content-Type-Options': 'nosniff' }).send(image.data);
 });
 function closeSessionConnections(sessionId: string) {
   for (const document of collab.documents.values()) for (const connection of document.getConnections()) if (connection.context?.sessionId === sessionId) connection.close();

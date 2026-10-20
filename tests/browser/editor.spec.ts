@@ -67,4 +67,40 @@ test.describe.serial('shared editor', () => {
     await page.locator('#menu-button').click(); await page.locator('#settings-button').click(); await page.getByLabel('Appearance').selectOption('dark'); await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark'); await page.getByLabel('Close', { exact: true }).click();
     await page.screenshot({ path: 'test-results/editor-dark.png' }); await context.close();
   });
+  test('autolinks end where the URL ends, and pasted images upload into the document', async ({ page }) => {
+    const errors: string[] = []; page.on('pageerror', error => errors.push(error.message));
+    await login(page); await page.locator('#menu-button').click(); await page.locator('#new-doc').click();
+    await page.getByLabel('Document title').fill('Links and images');
+    const content = page.getByRole('textbox', { name: 'Document content' }); await content.click();
+    // Backspacing into an autolink and typing on must not extend the link.
+    await page.keyboard.type('Try fal.ai '); await page.keyboard.press('Backspace'); await page.keyboard.press('Backspace'); await page.keyboard.type('i more words');
+    await expect(content.locator('a')).toHaveCount(1); await expect(content.locator('a')).toHaveText('fal.ai'); await expect(content).toContainText('Try fal.ai more words');
+    // Correcting a URL keeps it one link pointing at the corrected address.
+    await page.keyboard.press('Enter'); await page.keyboard.type('fal.ai/mdoels ');
+    for (let i = 0; i < 6; i++) await page.keyboard.press('Backspace');
+    await page.keyboard.type('odels and on');
+    const fixed = content.locator('p').nth(1).locator('a'); await expect(fixed).toHaveCount(1); await expect(fixed).toHaveText('fal.ai/models'); await expect(fixed).toHaveAttribute('href', 'http://fal.ai/models');
+    await page.keyboard.press('Enter');
+    const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+    await page.evaluate(png => {
+      const data = new DataTransfer(); data.items.add(new File([Uint8Array.from(atob(png), c => c.charCodeAt(0))], 'shot.png', { type: 'image/png' }));
+      document.querySelector('.prose')!.dispatchEvent(new ClipboardEvent('paste', { clipboardData: data, bubbles: true, cancelable: true }));
+    }, png);
+    const image = content.locator('img[src^="/api/images/"]'); await expect(image).toHaveCount(1);
+    await expect.poll(() => image.evaluate((img: HTMLImageElement) => img.complete && img.naturalWidth)).toBe(1);
+    const src = (await image.getAttribute('src'))!;
+    expect(await page.evaluate(async src => { const r = await fetch(src); return [r.status, r.headers.get('content-type')]; }, src)).toEqual([200, 'image/png']);
+    await expect(page.locator('#main')).toHaveAttribute('data-save-state', 'saved');
+    const id = new URL(page.url()).hash.slice(1);
+    await expect.poll(async () => (await request(page, `/documents/${id}/state`)).data.markdown).toContain(`![](${src})`);
+    // Only real raster images are accepted.
+    const rejected = await page.evaluate(async () => {
+      const me = await fetch('/api/me').then(r => r.json());
+      const post = (type: string, body: string) => fetch('/api/images', { method: 'POST', headers: { 'Content-Type': type, 'X-CSRF-Token': me.csrf }, body }).then(r => r.status);
+      return [await post('image/png', 'not an image'), await post('image/svg+xml', '<svg xmlns="http://www.w3.org/2000/svg"/>')];
+    });
+    expect(rejected).toEqual([400, 400]);
+    await page.reload(); await expect(page.getByRole('textbox', { name: 'Document content' }).locator(`img[src="${src}"]`)).toHaveCount(1);
+    expect(errors).toEqual([]);
+  });
 });
