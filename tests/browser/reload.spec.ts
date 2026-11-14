@@ -46,3 +46,13 @@ test('the server never lets an error for an app file, or the page naming them, b
   expect(missing.status()).toBe(404); expect(missing.headers()['cache-control']).toBe('no-store');
   for (const path of ['/', '/index.html', '/sw.js', '/a/deep/link']) expect((await request.get(path)).headers()['cache-control'], path).toBe('no-cache');
 });
+
+test('the page names its icon, and each icon it or the installed app asks for is an image', async ({ page, request }) => {
+  await page.goto('/');
+  const linked = await page.locator('link[rel~=icon], link[rel=apple-touch-icon]').evaluateAll(links => links.map(link => new URL((link as HTMLLinkElement).href).pathname));
+  expect(linked).toEqual(['/favicon.ico', '/favicon.svg', '/apple-touch-icon.png']);
+  const manifest = await (await request.get('/manifest.webmanifest')).json();
+  expect(manifest.icons).toHaveLength(3);
+  // A file that is missing would come back as the page itself.
+  for (const path of [...linked, ...manifest.icons.map((icon: { src: string }) => icon.src)]) expect((await request.get(path)).headers()['content-type'], path).toMatch(/^image\//);
+});
