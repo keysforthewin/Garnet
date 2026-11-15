@@ -2,6 +2,7 @@ import { test, expect } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
 import { chmod, readFile } from 'node:fs/promises';
 import { MongoClient } from 'mongodb';
+import { createServer } from 'node:http';
 test('retries server and mirror failures, rejects stale restore, and deduplicates actions', async ({ page }) => {
   test.setTimeout(120000);
   await page.goto('/'); await page.getByLabel('Username', { exact: true }).fill('admin'); await page.getByLabel('Password', { exact: true }).fill('ed-test-password-2026'); await page.getByRole('button', { name: 'Sign in', exact: true }).click();
@@ -30,6 +31,27 @@ test('retries server and mirror failures, rejects stale restore, and deduplicate
   const current = (await api(`/documents/${id}/content`)).data;
   expect((await api(`/documents/${id}/restore`, 'POST', { revisionId: revisions[0]._id, version: current.version })).status).toBe(200);
   await expect(page.locator('.prose')).not.toContainText('Mirror recovery.');
+});
+test('a proxy error page for an unreachable app opens the cached app, which syncs once the app returns', async ({ page }) => {
+  test.setTimeout(120000);
+  await page.goto('/'); await page.getByLabel('Username', { exact: true }).fill('admin'); await page.getByLabel('Password', { exact: true }).fill('ed-test-password-2026'); await page.getByRole('button', { name: 'Sign in', exact: true }).click();
+  await page.locator('#menu-button').click(); await page.locator('#new-doc').click(); await page.getByLabel('Document title').fill('Tunnel check'); await page.locator('.prose').click(); await page.keyboard.type('Before the tunnel dropped.');
+  await expect(page.locator('#main')).toHaveAttribute('data-save-state', 'saved'); await expect.poll(() => page.evaluate(() => !!navigator.serviceWorker.controller)).toBe(true);
+  const id = new URL(page.url()).hash.slice(1);
+  // Stands in for Cloudflare while its tunnel is down: the network works, and every request gets the proxy's error page.
+  execFileSync(process.execPath, ['scripts/test-app.mjs', 'stop']);
+  const proxy = createServer((_req, res) => { res.writeHead(530, { 'Content-Type': 'text/html' }); res.end('<h1>Cloudflare Tunnel error</h1>'); });
+  await new Promise<void>((resolve, reject) => { proxy.once('error', reject); proxy.listen(8081, '127.0.0.1', resolve); });
+  try {
+    await page.reload();
+    await expect(page.getByRole('textbox', { name: 'Document content' })).toContainText('Before the tunnel dropped.');
+    await page.locator('.prose').click(); await page.keyboard.press('Control+End'); await page.keyboard.type(' While it was down.');
+    await expect(page.locator('#main')).toHaveAttribute('data-save-state', /offline|syncing/);
+    await page.reload();
+    await expect(page.getByRole('textbox', { name: 'Document content' })).toContainText('While it was down.');
+  } finally { proxy.closeAllConnections(); await new Promise(resolve => proxy.close(resolve)); execFileSync(process.execPath, ['scripts/test-app.mjs', 'start']); }
+  await expect(page.locator('#main')).toHaveAttribute('data-save-state', 'saved', { timeout: 45000 });
+  await expect.poll(() => page.evaluate(id => fetch(`/api/documents/${id}/state`).then(r => r.json()).then(d => d.markdown), id), { timeout: 45000 }).toContain('While it was down.');
 });
 test('injected storage quota failure keeps the editor usable and permits in-memory export', async ({ page }) => {
   await page.goto('/'); await page.getByLabel('Username', { exact: true }).fill('admin'); await page.getByLabel('Password', { exact: true }).fill('ed-test-password-2026'); await page.getByRole('button', { name: 'Sign in', exact: true }).click();

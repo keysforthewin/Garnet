@@ -496,7 +496,8 @@ async function synchronize(pull = true) {
       // A restored document has a new connection, whose carets the editor showing it needs.
       if (restored.delete(id) && id === activeId && editors.get(id)?.awareness !== entry.awareness) await openDocument(id, Boolean(editor?.view.hasFocus()));
     }
-    if (!events) {
+    // An error response (a proxy's, while it cannot reach the app) closes the stream for good, where a failed connection retries.
+    if (!events || events.readyState === EventSource.CLOSED) {
       events = new EventSource('/api/events');
       events.addEventListener('document', e => {
         const d: DocMeta = JSON.parse((e as MessageEvent).data); const current = records.get(d.id);

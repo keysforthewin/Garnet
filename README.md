@@ -143,6 +143,8 @@ Use the local loopback URL or your HTTPS Cloudflare hostname for browser offline
 
 The whole text library downloads in the background. After the application has loaded and caching finishes, you can reopen it offline, edit existing documents, and create new ones. Browser storage quotas and eviction policies still apply; use “Keep offline storage” and periodic exports. Agent jobs and shared settings require a server connection. Offline AI prompts remain drafts.
 
+The same holds when your device is online and Garnet is not: with the tunnel or the server down, the browser opens its cached copy in place of Cloudflare's error page, and your edits sync once Garnet is reachable again. Each browser must have loaded Garnet once, at that hostname, while it was up.
+
 ## Editing
 
 - One click opens a document at your saved selection and scroll position.
