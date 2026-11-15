@@ -26,6 +26,8 @@ async function remembered(page: Page, hash: string) {
 test('desktop navigation combines documents and actions without shifting the editor', async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 900 });
   await login(page); await note(page, 'Desktop navigation');
+  // The word count arrives after a pause in typing and adds its line to the document.
+  await expect(page.locator('#word-count')).toHaveText('9 words');
   const before = await page.locator('#document').boundingBox();
   await expect(page.locator('#navigation')).not.toBeVisible();
   expect(await page.locator('.document-header').evaluate(e => e.getBoundingClientRect().height)).toBe(69);
@@ -147,6 +149,8 @@ test('slow startup never replaces a document created while preferences load', as
     await fresh.goto('/'); await pending;
     await fresh.locator('#menu-button').click(); await fresh.locator('#new-doc').click();
     await expect(fresh.getByLabel('Document title', { exact: true })).toHaveValue('Untitled');
+    // The title takes typing before the document has opened and taken the address.
+    await expect(fresh).toHaveURL(/#.+/);
     const selected = fresh.url(); release();
     await expect(fresh.locator('#main')).toHaveAttribute('data-save-state', 'saved');
     expect(fresh.url()).toBe(selected);
