@@ -17,29 +17,71 @@ async function open(page: Page, title: string) {
   await expect(page.getByLabel('Document title', { exact: true })).toHaveValue(title);
 }
 
-test('the workspace opens from the local copy before the session check, and an expired session asks to sign in over it', async ({ browser }) => {
+test('a remembered account waits for the session check, and opens from the local copy when no answer comes', async ({ browser }) => {
   // Service workers would hide the session check from request interception.
   const context = await browser.newContext({ serviceWorkers: 'block' }); const page = await context.newPage();
   try {
-    await login(page); const id = await note(page, 'Before the session check', 'Written before a slow session check.');
+    await login(page); await note(page, 'Before the session check', 'Written before a slow session check.');
     let release!: () => void; const held = new Promise<void>(resolve => { release = resolve; });
     await page.route('**/api/me', async route => { await held; await route.continue(); });
     await page.reload();
+    // Nothing of the app until the server answers, or has had its three seconds.
+    await page.waitForTimeout(1500);
+    await expect(page.locator('#app')).toBeEmpty();
     await expect(page.locator('.prose')).toContainText('Written before a slow session check.');
     release();
     await expect(page.locator('#main')).toHaveAttribute('data-save-state', 'saved');
+  } finally { await context.close(); }
+});
 
+test('a signed-out page shows only the sign-in page, and signing in reopens the local copy', async ({ browser }) => {
+  const context = await browser.newContext({ serviceWorkers: 'block' }); const page = await context.newPage();
+  try {
+    await login(page); const id = await note(page, 'Kept through a sign-out', 'Written while signed in.');
+    // The session ends elsewhere, as when it expires or another device changes the password.
     await page.evaluate(async () => { const { csrf } = await fetch('/api/me').then(r => r.json()); await fetch('/api/logout', { method: 'POST', headers: { 'X-CSRF-Token': csrf } }); });
-    await page.reload();
-    const signIn = page.locator('dialog', { hasText: 'Your local changes are retained.' });
-    await expect(signIn).toBeVisible();
-    await expect(page.locator('.prose')).toContainText('Written before a slow session check.');
-    await signIn.getByLabel('Password', { exact: true }).fill(password); await signIn.getByRole('button', { name: 'Sign in', exact: true }).click();
-    await expect(signIn).toBeHidden();
-    await page.locator('.prose').click(); await page.keyboard.press('Control+End'); await page.keyboard.type(' Synced after signing in again.');
+    await page.locator('.prose').click(); await page.keyboard.press('Control+End'); await page.keyboard.type(' Typed after the session ended.');
+    // The next sync learns of it and leaves for the sign-in page.
+    await page.evaluate(() => window.dispatchEvent(new Event('online')));
+    const heading = page.getByRole('heading', { name: 'A place for your thoughts.' });
+    await expect(heading).toBeVisible();
+    const signedOut = async () => {
+      await expect(heading).toBeVisible();
+      await expect(page.locator('.workspace, #menu-button, #ai-button, #empty-new, dialog')).toHaveCount(0);
+      await expect(page.getByLabel('Username', { exact: true })).toHaveValue('admin');
+    };
+    await signedOut();
+    // Nor does a reload open the local copy, even when the server cannot be asked.
+    await page.reload(); await signedOut();
+    await page.route('**/api/me', route => route.abort());
+    await page.reload(); await signedOut();
+    await expect(page.getByRole('alert')).toContainText('can’t be reached');
+    await page.unroute('**/api/me');
+    const other = await context.newPage(); await other.goto('/'); await expect(other.getByRole('heading', { name: 'A place for your thoughts.' })).toBeVisible();
+    await page.getByLabel('Password', { exact: true }).fill(password); await page.getByRole('button', { name: 'Sign in', exact: true }).click();
+    // Another tab waiting at the sign-in page is signed in with this one.
+    await expect(other.locator('.prose')).toContainText('Written while signed in.');
+    await other.close();
+    await expect(page.locator('.prose')).toContainText('Written while signed in. Typed after the session ended.');
     await expect(page.locator('#main')).toHaveAttribute('data-save-state', 'saved');
-    const state = await page.evaluate(async id => (await fetch(`/api/documents/${id}/state`).then(r => r.json())).markdown, id);
-    expect(state).toContain('Synced after signing in again.');
+    await expect.poll(() => page.evaluate(async id => (await fetch(`/api/documents/${id}/state`).then(r => r.json())).markdown, id)).toContain('Typed after the session ended.');
+    // Signed in again, a reload opens the workspace as before.
+    await page.reload(); await expect(page.locator('.prose')).toContainText('Typed after the session ended.');
+  } finally { await context.close(); }
+});
+
+test('a session that ended while the app was closed opens the sign-in page, never the workspace', async ({ browser }) => {
+  const context = await browser.newContext({ serviceWorkers: 'block' }); const page = await context.newPage();
+  try {
+    await login(page); await note(page, 'Closed before the sign-out', 'Not for a signed-out page.');
+    await context.clearCookies();
+    let workspaceShown = false;
+    await page.exposeFunction('workspaceShown', () => { workspaceShown = true; });
+    await page.addInitScript(() => { new MutationObserver(() => { if (document.querySelector('.workspace')) (window as any).workspaceShown(); }).observe(document, { childList: true, subtree: true }); });
+    await page.reload();
+    await expect(page.getByRole('heading', { name: 'A place for your thoughts.' })).toBeVisible();
+    await expect(page.getByText('Not for a signed-out page.')).toHaveCount(0);
+    expect(workspaceShown).toBe(false);
   } finally { await context.close(); }
 });
 
@@ -126,10 +168,10 @@ test('signing in after a reinstall asks for a new password at once, in this tab 
     } finally { await mongo.close(); }
 
     await page.reload();
-    const signIn = page.locator('dialog', { hasText: 'Your local changes are retained.' });
-    await signIn.getByLabel('Password', { exact: true }).fill(chosen); await signIn.getByRole('button', { name: 'Sign in', exact: true }).click();
+    await expect(page.getByLabel('Username', { exact: true })).toHaveValue('reinstalled');
+    await page.getByLabel('Password', { exact: true }).fill(chosen); await page.getByRole('button', { name: 'Sign in', exact: true }).click();
     await expect(page.getByRole('heading', { name: 'Make this account yours.' })).toBeVisible();
-    // The other tab's next sync finds the same account waiting for a new password.
+    // The other tab's next sync finds the same account waiting for a new password, as does its sign-in page if it had already left for it.
     await other.evaluate(() => dispatchEvent(new Event('online')));
     await expect(other.getByRole('heading', { name: 'Make this account yours.' })).toBeVisible();
     await setPassword(page, chosen, 'second-password-2026');

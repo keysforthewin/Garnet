@@ -41,6 +41,19 @@ test('when the app’s files keep failing, the page says so once and can try aga
   } finally { await context.close(); app.close(); }
 });
 
+test('a start that stalls says so instead of staying blank, and the app still opens when it can', async ({ browser }) => {
+  const context = await browser.newContext({ serviceWorkers: 'block' }); const page = await context.newPage();
+  try {
+    let release!: () => void; const held = new Promise<void>(resolve => { release = resolve; });
+    await page.route('**/api/me', async route => { await held; await route.continue(); });
+    await page.goto('/');
+    await expect(page.getByRole('heading', { name: 'Garnet couldn’t load.' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Try again' })).toBeVisible();
+    release();
+    await expect(page.getByRole('heading', { name: signIn })).toBeVisible();
+  } finally { await context.close(); }
+});
+
 test('the server never lets an error for an app file, or the page naming them, be kept', async ({ request }) => {
   const missing = await request.get('/assets/missing-file.js');
   expect(missing.status()).toBe(404); expect(missing.headers()['cache-control']).toBe('no-store');

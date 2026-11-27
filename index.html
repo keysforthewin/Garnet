@@ -3,7 +3,8 @@
 <script>
 // A reload must never leave a blank page. If the app's own files fail to load before it
 // appears (an error a proxy or the browser cached, a server mid-restart), fetch them fresh
-// and reload once. If that fails too, say so and offer to try again.
+// and reload once. If that fails too, or the app has shown nothing after ten seconds (a
+// request or a local database that never answers), say so and offer to try again.
 (() => {
   const key = 'garnet-load-repair'; let failed = false;
   const own = url => { try { const parsed = new URL(url, location.href); return parsed.origin === location.origin && parsed.pathname.startsWith('/assets/'); } catch { return false; } };
@@ -28,6 +29,7 @@
     if (repeated) show(urls); else location.reload();
   };
   addEventListener('error', e => { const url = e.target instanceof HTMLScriptElement ? e.target.src : e.target instanceof HTMLLinkElement ? e.target.href : ''; if (own(url)) void recover(url); }, true);
+  setTimeout(() => { if (failed || document.querySelector('#app')?.childElementCount) return; failed = true; show(assets()); }, 10000);
   addEventListener('vite:preloadError', e => void recover(String(e.payload?.message || '').match(/https?:\/\/\S+/)?.[0]));
 })();
 </script>

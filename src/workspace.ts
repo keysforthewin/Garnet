@@ -80,12 +80,18 @@ export async function start(account: User, session?: Promise<Session>) {
   document.documentElement.dataset.theme = prefs.theme || 'system';
   // Measure before building the workspace so reading the viewport doesn't force a layout of it.
   const updateViewport = () => {
-    const viewport = window.visualViewport;
-    if (viewport && viewport.scale === 1) document.documentElement.style.setProperty('--visible-height', `${viewport.height}px`);
+    const viewport = window.visualViewport; if (!viewport || viewport.scale !== 1) return;
+    // A page loaded while it is not on screen (a background tab, a browser preparing it ahead) can report no
+    // height, which would collapse the workspace to nothing. Leave the height to CSS until there is one.
+    if (viewport.height >= 1) document.documentElement.style.setProperty('--visible-height', `${viewport.height}px`);
+    else document.documentElement.style.removeProperty('--visible-height');
   };
   window.visualViewport?.addEventListener('resize', updateViewport);
+  // Coming on screen does not always report a resize.
+  for (const event of ['resize', 'pageshow']) window.addEventListener(event, updateViewport);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) updateViewport(); });
   updateViewport();
-  $('#app').innerHTML = `<div class="workspace"><dialog id="navigation" aria-label="Navigation"><aside id="sidebar"><div class="sidebar-top"><label class="search-label"><span class="sr-only">Search documents</span><input id="search" type="search" placeholder="Search your notes…" autocomplete="off"></label><kbd>⌘ K</kbd><button id="collapse" class="icon-button" autofocus title="Close navigation (Esc)" aria-label="Close navigation">×</button></div><div class="list-heading"><span id="list-label">YOUR DOCUMENTS</span><span id="doc-count"></span></div><nav id="doc-list" aria-label="Documents"></nav><div id="document-menu" class="menu-dropdown"></div><div class="sidebar-bottom"><button id="trash-button">Trash</button><button id="account-button" title="Account">${escape(user.username)}</button></div><div id="sync-error" class="sync-error" hidden></div></aside></dialog><main id="main"><header class="document-header"><div class="document-menu"><button id="menu-button" class="icon-button" aria-label="Open menu" aria-expanded="false" aria-controls="navigation" aria-haspopup="dialog"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button></div><div class="header-actions"><button id="ai-button" class="ai-button">Ask AI <kbd>⌘ J</kbd></button></div></header><div id="empty"><div class="empty-mark">Garnet</div><h1>Room to think.</h1><p>A quick note, a rough idea, a shared draft.<br>Choose a document or start a fresh page.</p><button class="primary" id="empty-new">New document</button></div><section id="document" hidden><input id="document-title" aria-label="Document title" placeholder="Untitled" maxlength="200"><div id="toolbar" role="toolbar" aria-label="Formatting"><button data-command="bold" title="Bold (Ctrl+B)"><strong>B</strong></button><button data-command="italic" title="Italic (Ctrl+I)"><em>I</em></button><button data-command="strike" title="Strikethrough"><s>S</s></button><span class="toolbar-divider"></span><button data-command="heading" title="Heading">H2</button><button data-command="bulletList" title="Bullet list">List</button><button data-command="orderedList" title="Numbered list">1.</button><button data-command="taskList" title="Checklist">Tasks</button><button data-command="blockquote" title="Quote">Quote</button><button data-command="codeBlock" title="Code block">Code</button><button data-command="link" title="Insert link">Link</button><button data-command="table" title="Insert table">Table</button><span class="toolbar-divider"></span><button data-command="undo" title="Undo">↶</button><button data-command="redo" title="Redo">↷</button></div><div id="editor-mount"></div><footer class="document-footer"><span id="word-count"></span><span id="people"></span></footer></section></main><aside id="ai-panel" hidden></aside></div>`;
+  $('#app').innerHTML = `<div class="workspace"><dialog id="navigation" aria-label="Navigation"><aside id="sidebar"><div class="sidebar-top"><label class="search-label"><span class="sr-only">Search documents</span><input id="search" type="search" placeholder="Search your notes…" autocomplete="off"></label><kbd>⌘ K</kbd><button id="collapse" class="icon-button" autofocus title="Close navigation (Esc)" aria-label="Close navigation">×</button></div><div class="list-heading"><span id="list-label">YOUR DOCUMENTS</span><span id="doc-count"></span></div><nav id="doc-list" aria-label="Documents"></nav><div id="document-menu" class="menu-dropdown"></div><div class="sidebar-bottom"><button id="trash-button">Trash</button><button id="account-button" title="Account">${escape(user.username)}</button></div></aside></dialog><main id="main"><header class="document-header"><div class="document-menu"><button id="menu-button" class="icon-button" aria-label="Open menu" aria-expanded="false" aria-controls="navigation" aria-haspopup="dialog"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button></div><div class="header-actions"><button id="ai-button" class="ai-button">Ask AI <kbd>⌘ J</kbd></button></div></header><div id="empty"><div class="empty-mark">Garnet</div><h1>Room to think.</h1><p>A quick note, a rough idea, a shared draft.<br>Choose a document or start a fresh page.</p><button class="primary" id="empty-new">New document</button></div><section id="document" hidden><input id="document-title" aria-label="Document title" placeholder="Untitled" maxlength="200"><div id="toolbar" role="toolbar" aria-label="Formatting"><button data-command="bold" title="Bold (Ctrl+B)"><strong>B</strong></button><button data-command="italic" title="Italic (Ctrl+I)"><em>I</em></button><button data-command="strike" title="Strikethrough"><s>S</s></button><span class="toolbar-divider"></span><button data-command="heading" title="Heading">H2</button><button data-command="bulletList" title="Bullet list">List</button><button data-command="orderedList" title="Numbered list">1.</button><button data-command="taskList" title="Checklist">Tasks</button><button data-command="blockquote" title="Quote">Quote</button><button data-command="codeBlock" title="Code block">Code</button><button data-command="link" title="Insert link">Link</button><button data-command="table" title="Insert table">Table</button><span class="toolbar-divider"></span><button data-command="undo" title="Undo">↶</button><button data-command="redo" title="Redo">↷</button></div><div id="editor-mount"></div><footer class="document-footer"><span id="word-count"></span><span id="people"></span></footer></section></main><aside id="ai-panel" hidden></aside></div>`;
   $('#empty-new').onclick = () => void newDocument();
   $('#collapse').onclick = () => closeMenu();
   $('#search').oninput = () => { searchQuery = ($<HTMLInputElement>('#search')).value; post({ type: 'search', query: searchQuery }); };
@@ -198,7 +204,7 @@ export async function start(account: User, session?: Promise<Session>) {
   await restore();
   setInterval(() => void synchronize(), 20000);
 }
-function status(message?: 'local-error' | 'saving' | 'auth-required') {
+function status(message?: 'local-error' | 'saving') {
   const d = records.get(activeId); const main = $('#main');
   const next = !d ? (online ? 'idle' : 'offline') : message || (localError ? 'local-error' : !online ? 'offline' : d.dirty || d.localOnly ? 'syncing' : 'saved');
   if (main.dataset.saveState !== next) main.dataset.saveState = next;
@@ -278,7 +284,8 @@ function connect(id: string, entry: OpenDoc) {
   if (!Provider) { import('@hocuspocus/provider').then(module => { Provider = module.HocuspocusProvider; connect(id, entry); }, () => {}); return; }
   const provider = new Provider({ url: `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/collaboration`, name: id, document: entry.doc, awareness: entry.awareness, token: () => csrf,
     onSynced: () => { provider.sendStateless('flush'); },
-    onAuthenticationFailed: () => { if (id === activeId) status('auth-required'); },
+    // The session may have ended: sync asks, and leaves for the sign-in page if so.
+    onAuthenticationFailed: () => void synchronize(),
     onStateless: async ({ payload }) => {
       const event = JSON.parse(payload);
       if (event.type === 'agent-edit') { const live = editors.get(id); if (live) showAgentEdit(live.editor, entry.doc, event, () => activeId === id); return; }
@@ -462,7 +469,7 @@ async function synchronize(pull = true) {
       }
       if (me.user.id !== user.id) throw new Error('Account changed. Reload this page.');
       if (startup) Object.assign(user, me.user);
-      setCsrf(me.csrf); online = true; $('#sync-error').hidden = true;
+      setCsrf(me.csrf); online = true;
       for (const [id, entry] of opened) connect(id, entry);
     }
     const pendingCreates = new Set((await cache.all<Operation>('ops')).filter(o => o.path === '/documents').map(o => o.body.id));
@@ -515,9 +522,12 @@ async function synchronize(pull = true) {
   } catch (error: any) {
     pullRequested ||= pulling; online = false;
     if (error.status === 401) {
-      status('auth-required'); $('#sync-error').hidden = false; $('#sync-error').innerHTML = '<button id="reauth">Sign in to sync your local changes</button>'; $('#reauth').onclick = reauthenticate;
-      // The session expired while the app was closed: ask now, over the documents that opened from the local copy.
-      if (startup) reauthenticate();
+      // The server ended the session. Nothing of the app is shown to a signed-out page: keep what was
+      // typed in the local copy, remember that this account is signed out, and start again at the sign-in page.
+      // Every edit is already in the local database; the snapshot is for search and export, and may not hold this up.
+      await Promise.race([flushLocal().catch(() => {}), new Promise(resolve => setTimeout(resolve, 2000))]);
+      try { localStorage.setItem('ed-user', JSON.stringify({ ...user, signedOut: true })); } catch {}
+      location.reload();
     } else { status(); }
   } finally { syncRunning = false; pullRunning = false; if (online && (syncAgain || (await cache.all('ops')).length)) setTimeout(() => void synchronize(pullRequested), 250); }
 }
@@ -651,13 +661,6 @@ async function toggleAI() {
   const panel = $('#ai-panel'); if (!panel.hidden) { panel.hidden = true; $('.workspace').classList.remove('ai-open'); return; }
   panel.hidden = false; $('.workspace').classList.add('ai-open');
   const { showAI } = await import('./ai'); showAI({ panel, records, active: () => activeId, flush: flushActive, close: () => { panel.hidden = true; $('.workspace').classList.remove('ai-open'); } });
-}
-function reauthenticate() {
-  const d = dialog('Sign in to sync', `<p>Your local changes are retained.</p><form><label>Username<input name="username" value="${escape(user.username)}" readonly autocomplete="username"></label><label>Password<input name="password" type="password" required autocomplete="current-password"></label><button class="primary">Sign in</button></form>`);
-  d.querySelector('form')!.onsubmit = async e => { e.preventDefault(); try { const result = await api('/login', 'POST', Object.fromEntries(new FormData(e.currentTarget as HTMLFormElement)));
-    // A reinstalled server's account needs a new password first (or is a different account): start again as it.
-    if (result.user.id !== user.id || result.user.mustChangePassword) { localStorage.setItem('ed-user', JSON.stringify(result.user)); location.reload(); return; }
-    setCsrf(result.csrf); d.close(); events?.close(); events = undefined; for (const entry of opened.values()) disconnect(entry); await synchronize(); if (activeId) await openDocument(activeId, false); } catch (error: any) { toast(error.message); } };
 }
 function showAccount() {
   const d = dialog('Your account', `<p>${escape(user.username)}${user.admin ? ' · Admin' : ''}</p><form id="change-password"><label>Current password<input name="current" type="password" autocomplete="current-password" required></label><label>New password<input name="password" type="password" autocomplete="new-password" minlength="10" required></label><button>Change password</button></form><hr><button id="sign-out">Sign out and clear this device’s cache</button>`);

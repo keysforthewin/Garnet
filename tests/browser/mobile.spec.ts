@@ -194,3 +194,21 @@ test('restoring a document does not dismiss navigation opened during startup', a
     await expect(fresh.locator('#navigation')).not.toBeVisible();
   } finally { release(); await context.close(); }
 });
+
+test('a phone page loaded before it is on screen, with no viewport height yet, still shows the workspace', async ({ browser }) => {
+  const context = await browser.newContext({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
+  try {
+    const page = await context.newPage();
+    await login(page); await note(page, 'Loaded off screen');
+    // As iOS browsers can report while preparing a page in the background.
+    await page.addInitScript(() => { (window as any).reportedHeight = 0; Object.defineProperty(window.visualViewport!, 'height', { get: () => (window as any).reportedHeight }); });
+    await page.reload();
+    await expect(page.getByLabel('Document title', { exact: true })).toHaveValue('Loaded off screen');
+    const height = () => page.locator('.workspace').evaluate(element => element.getBoundingClientRect().height);
+    expect(await height()).toBe(844);
+    await expect(page.locator('.prose')).toBeVisible();
+    // On screen, the visible height (which the keyboard shrinks) applies again.
+    await page.evaluate(() => { (window as any).reportedHeight = 500; window.dispatchEvent(new Event('pageshow')); });
+    expect(await height()).toBe(500);
+  } finally { await context.close(); }
+});
